@@ -15,6 +15,7 @@ import ThumbnailSidebar from './components/ThumbnailSidebar.vue'
 import ViewerToolbar from './components/ViewerToolbar.vue'
 import { movePagesWithin, usePageEdits } from './composables/usePageEdits'
 import { usePageSelection } from './composables/usePageSelection'
+import { ANY_PAGE_SIZE, pageMatchesAllowedSize, pageSizeWarningDetail, type AllowedPageSizeRule } from './host/allowedPageSize'
 import { dpiRequirement, pageRectToRequirement, requirementRectToPage, setDpiRequirement } from './host/dpiRequirement'
 import {
   annotationKind,
@@ -170,8 +171,36 @@ const guidesByPage = computed<PageGuide[][]>(() => {
 })
 const pageGuides = computed(() => guidesByPage.value[shownPage.value] ?? [])
 
+/** Paper size the host allows, with its inch threshold. `ANY` until the host sends one. */
+const allowedPageSize = ref<AllowedPageSizeRule>(ANY_PAGE_SIZE)
+
 /** Margin / keep-clear overlaps found by scanning each page's ink against its guides. */
-const imageWarnings = ref<ImageWarning[]>([])
+const contentWarnings = ref<ImageWarning[]>([])
+
+/** Pages whose inch size is outside the host's allowed paper size. None when the size is `ANY`. */
+const pageSizeWarnings = computed((): ImageWarning[] => {
+  const rule = allowedPageSize.value
+  const size = rule.size
+  if (!doc.value || size === 'ANY') return []
+  const warnings: ImageWarning[] = []
+  visiblePages.value.forEach((index, position) => {
+    const info = pageInfos.value[index]
+    if (!info || pageMatchesAllowedSize(info, rule)) return
+    warnings.push({
+      id: `size-${index}`,
+      page: index,
+      pageNumber: position + 1,
+      detail: pageSizeWarningDetail(size),
+    })
+  })
+  return warnings
+})
+
+const imageWarnings = computed(() =>
+  [...pageSizeWarnings.value, ...contentWarnings.value].sort(
+    (a, b) => a.pageNumber - b.pageNumber || a.id.localeCompare(b.id),
+  ),
+)
 const warningPages = computed(() => new Set(imageWarnings.value.map((warning) => warning.page)))
 let warningToken = 0
 let warningTimer: number | undefined
@@ -182,11 +211,11 @@ function scheduleWarningScan() {
   warningTimer = window.setTimeout(scanImageWarnings, WARNING_DEBOUNCE_MS)
 }
 
-/** Checks visible pages for content in margin bands and keep-clear areas; updates `imageWarnings`. */
+/** Checks visible pages for content in margin bands and keep-clear areas; updates `contentWarnings`. */
 async function scanImageWarnings() {
   const current = doc.value
   if (!current || !margins.value) {
-    imageWarnings.value = []
+    contentWarnings.value = []
     return
   }
   const token = ++warningToken
@@ -224,10 +253,10 @@ async function scanImageWarnings() {
       })
     }
     // Publish partial results so the bar updates before all 20+ pages finish.
-    imageWarnings.value = [...found].sort((a, b) => a.pageNumber - b.pageNumber || a.id.localeCompare(b.id))
+    contentWarnings.value = [...found].sort((a, b) => a.pageNumber - b.pageNumber || a.id.localeCompare(b.id))
   }
   if (token !== warningToken) return
-  imageWarnings.value = found.sort((a, b) => a.pageNumber - b.pageNumber || a.id.localeCompare(b.id))
+  contentWarnings.value = found.sort((a, b) => a.pageNumber - b.pageNumber || a.id.localeCompare(b.id))
 }
 
 watch(
@@ -236,7 +265,7 @@ watch(
     if (!doc.value || !margins.value) {
       window.clearTimeout(warningTimer)
       warningToken++
-      imageWarnings.value = []
+      contentWarnings.value = []
       return
     }
     scheduleWarningScan()
@@ -556,6 +585,12 @@ function onSetMargins(spec: MarginSpec | null) {
   margins.value = spec
 }
 
+/** Replaces the open document's allowed paper size. Does not dirty the document. */
+function onSetAllowedPageSize(rule: AllowedPageSizeRule) {
+  if (!doc.value || hostLoading.value) return
+  allowedPageSize.value = rule
+}
+
 watch(edits.hasChanges, (dirty) => notifyHost({ type: 'dirty-change', id: documentId.value, dirty }))
 
 function opsOf(index: number): readonly PageOp[] {
@@ -681,6 +716,7 @@ async function openHostImage(command: Extract<HostCommand, { type: 'open-image' 
     // Margins and DPI requirement come from the host, including null margins = none.
     margins: command.margins,
     dpiRequirement: command.dpiRequirement,
+    allowedPageSize: command.allowedPageSize,
     skipConfirm: true,
   })
   hostLoading.value = false
@@ -711,6 +747,7 @@ function resetViewerDocument() {
   savingId.value = null
   margins.value = null
   documentDpi.value = null
+  allowedPageSize.value = ANY_PAGE_SIZE
   edits.reset(0)
   annotationEditor.value = null
   pageUrl.value = null
@@ -749,12 +786,18 @@ async function loadServerDocument(id: string) {
 
 /**
  * Shows `file` (a TIFF, or a PDF converted first) in place of the open document; resolves to whether it was opened.
- * `margins` / `dpiRequirement` from the host replace stand-in loads when provided (including `null` margins = none).
+ * `margins` / `dpiRequirement` / `allowedPageSize` from the host replace stand-in loads when provided
+ * (including `null` margins = none). A missing allowed size is `ANY` (no page-size warning).
  */
 async function openDocument(
   file: File,
   id: string | null,
-  options: { margins?: MarginSpec | null; dpiRequirement?: number | null; skipConfirm?: boolean } = {},
+  options: {
+    margins?: MarginSpec | null
+    dpiRequirement?: number | null
+    allowedPageSize?: AllowedPageSizeRule
+    skipConfirm?: boolean
+  } = {},
 ): Promise<boolean> {
   if (!options.skipConfirm && !canReplaceDocument()) return false
   const token = ++loadToken
@@ -774,6 +817,7 @@ async function openDocument(
     doc.value = next
     documentId.value = id
     documentDpi.value = options.dpiRequirement && options.dpiRequirement > 0 ? options.dpiRequirement : null
+    allowedPageSize.value = options.allowedPageSize ?? ANY_PAGE_SIZE
     if (options.margins !== undefined) {
       margins.value = options.margins
     } else {
@@ -1230,6 +1274,9 @@ onMounted(() => {
         break
       case 'set-margins':
         onSetMargins(command.margins)
+        break
+      case 'set-allowed-page-size':
+        onSetAllowedPageSize(command.allowedPageSize)
         break
     }
   })

@@ -128,11 +128,13 @@ onViewerEvent((event) => {
   "name": "1842.tif",
   "buffer": "<ArrayBuffer of TIFF bytes>",
   "margins": null,
-  "dpiRequirement": 300
+  "dpiRequirement": 300,
+  "allowedPageSize": "LETTER",
+  "threshold": 0.1
 }
 ```
 
-`buffer` is an `ArrayBuffer`. Transfer it in the third argument of `postMessage` so the bytes move instead of being copied. After the transfer the host's copy is detached. `name` is the file name shown in the status bar. `margins` and `dpiRequirement` may be omitted. Send them on `open-image` when they are already known. Margins that arrive later use `set-margins`.
+`buffer` is an `ArrayBuffer`. Transfer it in the third argument of `postMessage` so the bytes move instead of being copied. After the transfer the host's copy is detached. `name` is the file name shown in the status bar. `margins`, `dpiRequirement`, `allowedPageSize`, and `threshold` may be omitted. Send them on `open-image` when they are already known. Margins that arrive later use `set-margins`. The allowed page size can be changed later with `set-allowed-page-size`.
 
 `document-loaded`:
 
@@ -340,6 +342,35 @@ Without the right bit, `x` is from the left edge. Without the bottom bit, `y` is
 `firstPageMarginsAreZero`, `lastPageMarginsAreZero`, and `defaultPageMarginsAreZero` force that page's bands to zero and drop its other areas. A missing page object falls back to `defaultPage`, and a missing `defaultPage` falls back to all zeros.
 
 Inches become pixels with the TIFF `XResolution` / `YResolution`. A page with no resolution is treated as 8.5 inches wide. Guides belong to the page as displayed: rotating the page turns the content, and the top margin stays on top.
+
+## Allowed page size
+
+The host sends the paper size this document's pages are allowed to be, and a threshold in inches. Both come from the company's API response and are forwarded on `open-image` (or later with `set-allowed-page-size`). Neither dirties the document.
+
+`allowedPageSize` is one of `LETTER`, `LEGAL`, `LETTERLEGAL`, or `ANY`.
+
+| Value | Allowed size |
+| --- | --- |
+| `LETTER` | 8.5" × 11" |
+| `LEGAL` | 8.5" × 14" |
+| `LETTERLEGAL` | Letter or Legal |
+| `ANY` | No page-size warning |
+
+A missing or unrecognized size is `ANY`. Landscape counts: 11" × 8.5" is Letter.
+
+`threshold` is how far a page may sit from that size, in inches. `0.1` means 0.1" under or 0.1" over (`-.1/+.1`). A string `"-.2/+.1"` sets the two sides separately: the number before `/` is how far under, the number after is how far over. A missing threshold is exact (no slack).
+
+The viewer measures each visible page in inches from its TIFF resolution (after Convert to Letter or Legal). A page outside the threshold, and not `ANY`, is an image warning:
+
+- `Page 1 is not within the allowed page size of Letter`
+- `Page 2 is not within the allowed page size of Legal`
+- `Page 3 is not within the allowed page size of (Letter or Legal)`
+
+```json
+{ "target": "tiff-image-viewer", "type": "set-allowed-page-size", "allowedPageSize": "LETTERLEGAL", "threshold": 0.1 }
+```
+
+The command is ignored when no document is open or while an image is loading.
 
 ## DPI requirement
 
@@ -639,13 +670,14 @@ Open http://localhost:5173/examples/host.html. The left side loads a TIFF from `
 | `type` | Fields | |
 | --- | --- | --- |
 | `image-loading` | `id?` | Show the loading overlay. |
-| `open-image` | `id?`, `name`, `buffer`, `margins?`, `dpiRequirement?` | Open TIFF bytes. Transfer `[buffer]`. |
+| `open-image` | `id?`, `name`, `buffer`, `margins?`, `dpiRequirement?`, `allowedPageSize?`, `threshold?` | Open TIFF bytes. Transfer `[buffer]`. |
 | `image-missing` | `id?` | No image for this document. |
 | `image-cleared` | | Empty the viewer. |
 | `save-acked` | `id` | The Apply TIFF was stored. `id` matches `save-requested`. |
 | `save-failed` | `id`, `message` | The store rejected it. Edits stay pending. |
 | `set-id` | `id` | Replace the open document's key. `null` clears it. |
 | `set-margins` | `margins` | Margin rules for the open document. `null` clears the guides. |
+| `set-allowed-page-size` | `allowedPageSize`, `threshold` | `LETTER`, `LEGAL`, `LETTERLEGAL`, or `ANY`, and the inch tolerance. |
 | `set-dpi-requirement` | `dpiRequirement` | Company DPI requirement. Missing or non-positive restores 300. |
 | `set-icons` | `icons` | `{ [name]: url or svg or null }`. |
 | `set-scan-license` | `productKey` | Dynamic Web TWAIN key. `null` hides Scan. |

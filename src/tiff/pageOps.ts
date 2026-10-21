@@ -162,15 +162,14 @@ export function editedPageInfo(page: PageInfo, ops: readonly PageOp[]): PageInfo
 }
 
 /**
- * The op converting `page` (as currently edited) to `size`, matching its orientation (landscape pages
- * become landscape Letter/Legal), or null if it already has that size.
+ * The op converting `page` (as currently edited) to `size`, always portrait (Letter is 8.5" × 11",
+ * Legal is 8.5" × 14"), or null if it already has that size. A sideways scan is fitted into that page.
  */
 export function paperOp(page: PageInfo, size: PaperSize): PaperOp | null {
   const { dpiX, dpiY } = pageResolution(page)
   const paper = PAPER_SIZES[size]
-  const landscape = page.width > page.height
-  const width = Math.round((landscape ? paper.height : paper.width) * dpiX)
-  const height = Math.round((landscape ? paper.width : paper.height) * dpiY)
+  const width = Math.round(paper.width * dpiX)
+  const height = Math.round(paper.height * dpiY)
   return width === page.width && height === page.height ? null : { type: 'paper', width, height }
 }
 

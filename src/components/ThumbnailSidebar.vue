@@ -20,7 +20,7 @@ const props = defineProps<{
   pageInfos: readonly PageInfo[]
   /** Margins / keep-clear areas per page (page pixels), same as drawn in the viewer. */
   guides: readonly (readonly PageGuide[])[]
-  /** Pages that currently have an image warning (margin / keep-clear overlap). */
+  /** Pages that currently have an image warning (margin overlap or a page size the host does not allow). */
   warningPages?: ReadonlySet<number>
   selected: ReadonlySet<number>
   /** Pages deleted by the user (pending; Undo / Cancel restore them). */

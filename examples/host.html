@@ -126,6 +126,20 @@
           <input id="replace-image" type="file" accept=".tif,.tiff,.pdf,image/tiff,application/pdf" />
         </label>
         <button type="button" id="set-margins" disabled>Set margins</button>
+        <label>
+          Allowed page size
+          <select id="allowed-page-size">
+            <option value="ANY">ANY</option>
+            <option value="LETTER">LETTER</option>
+            <option value="LEGAL">LEGAL</option>
+            <option value="LETTERLEGAL">LETTERLEGAL</option>
+          </select>
+        </label>
+        <label>
+          Threshold
+          <input id="page-size-threshold" value="0.1" title="Inches under and over the paper size. 0.1 means ±0.1. -.2/+.1 sets the two sides." />
+        </label>
+        <button type="button" id="set-page-size" disabled>Set page size</button>
       </div>
 
       <h2>Annotations</h2>
@@ -153,6 +167,7 @@
       const removeUneditableBtn = document.getElementById('remove-uneditable')
       const burnAnnotationsBtn = document.getElementById('burn-annotations')
       const setMarginsBtn = document.getElementById('set-margins')
+      const setPageSizeBtn = document.getElementById('set-page-size')
       const fileLabel = document.getElementById('file-label')
 
       /** Latest TIFF the viewer asked us to store, keyed by document id. */
@@ -199,7 +214,17 @@
         addUneditableBtn.disabled = !next
         burnAnnotationsBtn.disabled = !next
         setMarginsBtn.disabled = !next
+        setPageSizeBtn.disabled = !next
         syncRemoveButton()
+      }
+
+      /** `allowedPageSize` and `threshold` for open-image and set-allowed-page-size. */
+      function pageSizeFields() {
+        const allowedPageSize = document.getElementById('allowed-page-size').value
+        const raw = document.getElementById('page-size-threshold').value.trim()
+        const asNumber = Number(raw)
+        const threshold = raw.includes('/') || !Number.isFinite(asNumber) ? raw : asNumber
+        return { allowedPageSize, threshold }
       }
 
       async function loadMargins() {
@@ -233,6 +258,7 @@
               buffer,
               margins: rules,
               dpiRequirement: 300,
+              ...pageSizeFields(),
             },
             [buffer],
           )
@@ -264,6 +290,7 @@
               buffer: loaded.buffer,
               margins: rules,
               dpiRequirement: 300,
+              ...pageSizeFields(),
             },
             [loaded.buffer],
           )
@@ -347,6 +374,14 @@
         log('Set margins')
       }
 
+      /** Sends the allowed paper size and threshold to the open document. */
+      function setAllowedPageSize() {
+        if (!ready) return
+        const fields = pageSizeFields()
+        post({ type: 'set-allowed-page-size', ...fields })
+        log(`Allowed page size ${fields.allowedPageSize}, threshold ${fields.threshold}`)
+      }
+
       window.addEventListener('message', (event) => {
         if (event.source !== viewer.contentWindow) return
         const data = event.data
@@ -407,6 +442,7 @@
       removeUneditableBtn.addEventListener('click', removeUneditable)
       burnAnnotationsBtn.addEventListener('click', burnAnnotations)
       setMarginsBtn.addEventListener('click', () => void setDocumentMargins())
+      setPageSizeBtn.addEventListener('click', () => setAllowedPageSize())
       document.getElementById('replace-image').addEventListener('change', (event) => {
         const file = event.target.files?.[0]
         event.target.value = ''

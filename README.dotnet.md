@@ -57,6 +57,8 @@ async function openDocument(id) {
       buffer,
       margins: image.documentMargins,
       dpiRequirement: image.dpiRequirement,
+      allowedPageSize: image.allowedPageSize,
+      threshold: image.threshold,
     },
     [buffer],
   )
@@ -71,6 +73,8 @@ async function openDocument(id) {
   "id": "1842",
   "name": "1842.tif",
   "dpiRequirement": 300,
+  "allowedPageSize": "LETTER",
+  "threshold": 0.1,
   "documentMargins": {
     "firstPage": {
       "top": 0.25,
@@ -113,6 +117,8 @@ The same call when the document has no scan yet:
   "id": "empty",
   "name": null,
   "dpiRequirement": 300,
+  "allowedPageSize": "ANY",
+  "threshold": 0.1,
   "documentMargins": null
 }
 ```
@@ -122,6 +128,8 @@ The host sends `image-missing` for that response. `GET .../tiff` on a document w
 `documentMargins` is the object `open-image` and `set-margins` accept. Lengths are inches. `anchor` bits are in [README.md](README.md): `4` measures `x` from the right edge, `2` measures `y` from the bottom, and `5` is the upper-right box. A true `*MarginsAreZero` flag clears that page's bands and other areas. `null` margins draw nothing.
 
 `dpiRequirement` is the document's DPI requirement. The host sends it as `dpiRequirement` on `open-image`. Omit it from the JSON when the company default (300, or `set-dpi-requirement`) should apply. The viewer still accepts `countyDpi` on the viewer command when `dpiRequirement` is absent. This API only returns `dpiRequirement`.
+
+`allowedPageSize` is `LETTER`, `LEGAL`, `LETTERLEGAL`, or `ANY`. `threshold` is inches: `0.1` means the page may be 0.1" under or over that paper size (`-.1/+.1`). The host forwards both on `open-image` (or later with `set-allowed-page-size`). `ANY`, or a missing size, draws no page-size warning. A page outside the threshold warns, for example `Page 1 is not within the allowed page size of Letter`. See [README.md](README.md).
 
 `GET /api/documents/1842/tiff` responds with `Content-Type: image/tiff` and the file bytes. The host transfers that `ArrayBuffer` on `open-image`.
 
@@ -276,6 +284,12 @@ public sealed class DocumentImage
 
     /// <summary>Margin rules passed through to open-image or set-margins. Null draws nothing.</summary>
     public DocumentMargins? DocumentMargins { get; set; }
+
+    /// <summary>LETTER, LEGAL, LETTERLEGAL, or ANY. ANY draws no page-size warning.</summary>
+    public string AllowedPageSize { get; set; } = "ANY";
+
+    /// <summary>Inches a page may sit under or over the allowed paper size. 0.1 is ±0.1".</summary>
+    public double Threshold { get; set; }
 }
 
 public sealed class DocumentMargins

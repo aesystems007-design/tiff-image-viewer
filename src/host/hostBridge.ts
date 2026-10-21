@@ -8,6 +8,7 @@
  */
 
 import { marginSpecFromHost, type MarginSpec } from '../margins/margins'
+import { allowedPageSizeFromHost, type AllowedPageSizeRule } from './allowedPageSize'
 import { parseDpiRequirement } from './dpiRequirement'
 import type { AnnotationKind, UneditableAnnotation } from './uneditableAnnotation'
 
@@ -102,6 +103,11 @@ export type HostCommand =
       margins: MarginSpec | null
       /** This document's DPI requirement; null = use the company's asserted requirement. */
       dpiRequirement: number | null
+      /**
+       * Paper size this document's pages must be, and how far (inches) they may sit under / over it.
+       * `ANY` does not warn. Missing values are `ANY` with no slack.
+       */
+      allowedPageSize: AllowedPageSizeRule
     }
   /**
    * The host has no image for this document. Viewer stops Loading and shows
@@ -156,6 +162,11 @@ export type HostCommand =
    * clears them. Guides update in place; this does not dirty the document or reopen the image.
    */
   | { type: 'set-margins'; margins: MarginSpec | null }
+  /**
+   * Allowed paper size for the open document, same fields as `open-image` (`allowedPageSize`, `threshold`).
+   * `ANY`, or a missing size, clears the page-size warnings. Does not dirty the document or reopen the image.
+   */
+  | { type: 'set-allowed-page-size'; allowedPageSize: AllowedPageSizeRule }
 
 /**
  * `?viewerId=` in the page URL: echoed in every event so a host running several viewers (tabs) can tell them
@@ -233,6 +244,7 @@ function parseCommand(data: unknown): HostCommand | null {
       buffer,
       margins: marginSpecFromHost(message.margins),
       dpiRequirement: messageDpi(message),
+      allowedPageSize: allowedPageSizeFromHost(message.allowedPageSize, message.threshold),
     }
   }
 
@@ -302,6 +314,10 @@ function parseCommand(data: unknown): HostCommand | null {
 
   if (message.type === 'set-margins') {
     return { type: 'set-margins', margins: marginSpecFromHost(message.margins) }
+  }
+
+  if (message.type === 'set-allowed-page-size') {
+    return { type: 'set-allowed-page-size', allowedPageSize: allowedPageSizeFromHost(message.allowedPageSize, message.threshold) }
   }
 
   return null

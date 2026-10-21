@@ -227,6 +227,7 @@
         viewer.addUneditableBtn.disabled = !next
         viewer.burnAnnotationsBtn.disabled = !next
         viewer.setMarginsBtn.disabled = !next
+        viewer.setPageSizeBtn.disabled = !next
         syncRemoveButton(viewer)
       }
 
@@ -238,6 +239,13 @@
           viewer.tab.classList.toggle('active', on)
           viewer.card.classList.toggle('active', on)
         }
+      }
+
+/** Threshold from this viewer's card. A number is ± that many inches; `-.1/+.1` sets the two sides. */
+      function pageSizeThreshold(card) {
+        const raw = card.querySelector('.page-size-threshold').value.trim()
+        const asNumber = Number(raw)
+        return raw.includes('/') || !Number.isFinite(asNumber) ? raw : asNumber
       }
 
       async function loadMargins() {
@@ -282,6 +290,8 @@
               buffer,
               margins: rules,
               dpiRequirement: 300,
+              allowedPageSize: 'ANY',
+              threshold: pageSizeThreshold(viewer.card),
             },
             [buffer],
           )
@@ -317,6 +327,8 @@
               buffer: loaded.buffer,
               margins: rules,
               dpiRequirement: 300,
+              allowedPageSize: 'ANY',
+              threshold: pageSizeThreshold(viewer.card),
             },
             [loaded.buffer],
           )
@@ -400,6 +412,14 @@
         log(viewer, 'Set margins')
       }
 
+      /** Sets the open document to Letter or Legal. Opening a document stays ANY until this is clicked. */
+      function setAllowedPageSize(viewer) {
+        if (!viewer.ready) return
+        const threshold = pageSizeThreshold(viewer.card)
+        post(viewer, { type: 'set-allowed-page-size', allowedPageSize: 'LETTERLEGAL', threshold })
+        log(viewer, `Allowed page size LETTERLEGAL, threshold ${threshold}`)
+      }
+
       function mountViewer(viewerId, sampleId) {
         const iframe = document.createElement('iframe')
         iframe.title = sampleId || 'Add Image'
@@ -426,6 +446,11 @@
               <input class="replace-image" type="file" accept=".tif,.tiff,.pdf,image/tiff,application/pdf" />
             </label>
             <button type="button" class="set-margins" disabled>Set margins</button>
+            <label>
+              Threshold
+              <input class="page-size-threshold" value="0.1" title="Inches under and over Letter or Legal. 0.1 means ±0.1. -.2/+.1 sets the two sides." />
+            </label>
+            <button type="button" class="set-page-size" disabled>Set Letter or Legal</button>
           </div>
           <h3>Annotations</h3>
           <div class="actions">
@@ -464,6 +489,7 @@
           removeUneditableBtn: card.querySelector('.remove-uneditable'),
           burnAnnotationsBtn: card.querySelector('.burn-annotations'),
           setMarginsBtn: card.querySelector('.set-margins'),
+          setPageSizeBtn: card.querySelector('.set-page-size'),
           openId: null,
           ready: false,
           hasImage: false,
@@ -486,6 +512,7 @@
         viewer.removeUneditableBtn.addEventListener('click', () => removeUneditable(viewer))
         viewer.burnAnnotationsBtn.addEventListener('click', () => burnAnnotations(viewer))
         viewer.setMarginsBtn.addEventListener('click', () => void setDocumentMargins(viewer))
+        viewer.setPageSizeBtn.addEventListener('click', () => setAllowedPageSize(viewer))
         viewers.push(viewer)
         iframe.addEventListener('load', () => {
           if (viewer.sampleId) openSample(viewer, viewer.sampleId)
