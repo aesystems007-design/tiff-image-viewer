@@ -1,0 +1,5 @@
+# Cloudflare Pages: static CDN for the built viewer (`npm run deploy`).
+# Docs: https://developers.cloudflare.com/pages/
+name = "tiff-image-viewer"
+compatibility_date = "2025-10-01"
+pages_build_output_dir = "dist"

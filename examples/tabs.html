@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Several viewers</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        color: #1d2635;
+        font: 14px/1.4 Arial, Helvetica, sans-serif;
+      }
+      .host {
+        box-sizing: border-box;
+        width: 40%;
+        padding: 16px 18px;
+        overflow: auto;
+        background: #fff;
+        border-right: 1px solid #c9d1dd;
+      }
+      .stage {
+        display: flex;
+        flex-direction: column;
+        width: 60%;
+        min-width: 0;
+        background: #5a5a5a;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 18px;
+      }
+      .intro {
+        margin: 0 0 14px;
+        color: #4a5568;
+      }
+      .card {
+        display: none;
+        margin: 0;
+        padding: 0;
+        border: none;
+        background: transparent;
+      }
+      .card.active {
+        display: block;
+      }
+      .card h2 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        text-transform: none;
+        letter-spacing: 0;
+        color: #1d2635;
+      }
+      .card h2 button {
+        padding: 0;
+        border: none;
+        background: none;
+        color: inherit;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      h3 {
+        margin: 10px 0 6px;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: #6b7686;
+      }
+      .samples,
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      button {
+        padding: 6px 10px;
+        border: 1px solid #c9d1dd;
+        border-radius: 4px;
+        background: #fff;
+        color: #1f3a68;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        background: #f4f6f9;
+      }
+      button.active,
+      .samples button.active {
+        background: #e8eef8;
+        border-color: #2f6fd1;
+      }
+      button.primary {
+        background: #3d64b5;
+        border-color: #3d64b5;
+        color: #fff;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      label.file {
+        display: inline-block;
+        padding: 6px 10px;
+        border: 1px solid #c9d1dd;
+        border-radius: 4px;
+        background: #fff;
+        color: #1f3a68;
+        cursor: pointer;
+      }
+      label.file:hover {
+        background: #f4f6f9;
+      }
+      label.file input {
+        display: none;
+      }
+      .log {
+        margin: 0;
+        padding: 8px 10px;
+        min-height: 3.2em;
+        max-height: 7em;
+        overflow: auto;
+        background: #fff;
+        border: 1px solid #c9d1dd;
+        border-radius: 4px;
+        font-family: Consolas, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+      .tabs {
+        display: flex;
+        gap: 4px;
+        padding: 8px 8px 0;
+        background: #fff;
+        border-bottom: 1px solid #c9d1dd;
+      }
+      .tabs button {
+        border-bottom: none;
+        border-radius: 4px 4px 0 0;
+      }
+      .tabs button.active {
+        background: #1f3a68;
+        border-color: #1f3a68;
+        color: #fff;
+      }
+      .tabs button.add {
+        margin-left: auto;
+        border-style: dashed;
+      }
+      .frames {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+      }
+      iframe {
+        position: absolute;
+        inset: 0;
+        display: none;
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      iframe.active {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="host">
+      <h1>Several viewers</h1>
+      <p class="intro">
+        Three viewers, one tab each. The controls on the left are for the selected tab. Add Image opens an empty viewer in a fourth tab; its button says Upload Image until a file is open, then Replace Image. Set <code>tiffHostLoadImage</code> to load that file from your own API instead.
+      </p>
+      <div id="cards"></div>
+    </section>
+    <section class="stage">
+      <nav class="tabs" id="tabs"></nav>
+      <div class="frames" id="frames"></div>
+    </section>
+    <script type="module">
+      import { loadUploadedImage } from './loadImage.js'
+      const TARGET = 'tiff-image-viewer'
+      const SAMPLES = ['single-page', 'multi-page', 'skewed', 'speckled']
+      const cardsEl = document.getElementById('cards')
+      const tabsEl = document.getElementById('tabs')
+      const framesEl = document.getElementById('frames')
+
+      /** Latest TIFF a viewer asked us to store, keyed by viewer id and document id. */
+      const saved = new Map()
+      let margins = null
+      let oneInchMargins = null
+      /** @type {{ id: string, sampleId: string, iframe: HTMLIFrameElement, tab: HTMLButtonElement, card: HTMLElement, logEl: HTMLElement, fileLabel: HTMLElement, addAnnotationBtn: HTMLButtonElement, addUneditableBtn: HTMLButtonElement, removeUneditableBtn: HTMLButtonElement, burnAnnotationsBtn: HTMLButtonElement, setMarginsBtn: HTMLButtonElement, openId: string | null, ready: boolean, hasImage: boolean, loadSeq: number, requestSeq: number, uneditableSeq: number, uneditableIds: number[], pendingUneditable: Set<string | number> }[]} */
+      const viewers = []
+      let activeId = null
+      let addedImage = false
+
+      function log(viewer, line) {
+        viewer.logEl.textContent = `${line}\n${viewer.logEl.textContent}`.slice(0, 2000)
+      }
+
+      function post(viewer, message, transfer) {
+        const frame = viewer.iframe.contentWindow
+        if (!frame) return
+        frame.postMessage({ target: TARGET, ...message }, location.origin, transfer)
+      }
+
+      function syncRemoveButton(viewer) {
+        viewer.removeUneditableBtn.disabled = !viewer.ready || viewer.uneditableIds.length === 0
+      }
+
+      function setHasImage(viewer, next) {
+        viewer.hasImage = next
+        viewer.fileLabel.textContent = next ? 'Replace Image' : 'Upload Image'
+      }
+
+      function setReady(viewer, next) {
+        viewer.ready = next
+        if (!next) {
+          viewer.uneditableIds.length = 0
+          viewer.pendingUneditable.clear()
+        }
+        viewer.addAnnotationBtn.disabled = !next
+        viewer.addUneditableBtn.disabled = !next
+        viewer.burnAnnotationsBtn.disabled = !next
+        viewer.setMarginsBtn.disabled = !next
+        syncRemoveButton(viewer)
+      }
+
+      function selectViewer(id) {
+        activeId = id
+        for (const viewer of viewers) {
+          const on = viewer.id === id
+          viewer.iframe.classList.toggle('active', on)
+          viewer.tab.classList.toggle('active', on)
+          viewer.card.classList.toggle('active', on)
+        }
+      }
+
+      async function loadMargins() {
+        if (margins) return margins
+        const response = await fetch('/samples/margins.json')
+        if (!response.ok) return null
+        margins = await response.json()
+        return margins
+      }
+      async function loadOneInchMargins() {
+        if (oneInchMargins) return oneInchMargins
+        const response = await fetch('/samples/margins-1inch.json')
+        if (!response.ok) return null
+        oneInchMargins = await response.json()
+        return oneInchMargins
+      }
+
+      async function openSample(viewer, id) {
+        const request = ++viewer.loadSeq
+        setReady(viewer, false)
+        viewer.openId = id
+        viewer.sampleId = id
+        viewer.tab.textContent = id
+        viewer.card.querySelector('h2 button').textContent = id
+        for (const button of viewer.card.querySelectorAll('.samples button')) {
+          button.classList.toggle('active', button.dataset.id === id)
+        }
+        log(viewer, `Loading ${id}…`)
+        post(viewer, { type: 'image-loading', id })
+        try {
+          const stored = saved.get(`${viewer.id}:${id}`)
+          const buffer = stored ? stored.slice(0) : await (await fetch(`/samples/${id}.tif`)).arrayBuffer()
+          if (buffer.byteLength === 0) throw new Error(`${id}.tif was empty or missing`)
+          const rules = await loadMargins()
+          if (request !== viewer.loadSeq) return
+          post(
+            viewer,
+            {
+              type: 'open-image',
+              id,
+              name: `${id}.tif`,
+              buffer,
+              margins: rules,
+              dpiRequirement: 300,
+            },
+            [buffer],
+          )
+        } catch (err) {
+          log(viewer, `Could not open ${id}: ${err instanceof Error ? err.message : err}`)
+        }
+      }
+
+      /** Opens a file in this viewer. The document key stays unless `tiffHostLoadImage` returns one. */
+      async function replaceWithFile(viewer, file) {
+        const request = ++viewer.loadSeq
+        const id = viewer.openId
+        log(viewer, `${viewer.hasImage ? 'Replacing' : 'Uploading'} ${file.name}…`)
+        try {
+          const loaded = await loadUploadedImage(file)
+          if (request !== viewer.loadSeq) return
+          const nextId = loaded.id !== undefined ? (loaded.id == null || loaded.id === '' ? null : String(loaded.id)) : id
+          viewer.openId = nextId
+          const label = loaded.name.replace(/\.(tif|tiff|pdf)$/i, '')
+          viewer.tab.textContent = label
+          viewer.card.querySelector('h2 button').textContent = label
+          const rules = await loadMargins()
+          if (request !== viewer.loadSeq) return
+          setReady(viewer, false)
+          for (const button of viewer.card.querySelectorAll('.samples button')) button.classList.remove('active')
+          post(viewer, { type: 'image-loading', id: nextId })
+          post(
+            viewer,
+            {
+              type: 'open-image',
+              id: nextId,
+              name: loaded.name,
+              buffer: loaded.buffer,
+              margins: rules,
+              dpiRequirement: 300,
+            },
+            [loaded.buffer],
+          )
+        } catch (err) {
+          if (request === viewer.loadSeq) log(viewer, `Could not replace image: ${err instanceof Error ? err.message : err}`)
+        }
+      }
+
+      function addAnnotation(viewer) {
+        const requestId = viewer.requestSeq++
+        post(viewer, {
+          type: 'add-annotation',
+          requestId,
+          dpi: 300,
+          annotation: {
+            type: 'Editable',
+            Text: 'Sample annotation',
+            XPos: 150,
+            YPos: 200,
+            Width: 900,
+            Height: 160,
+            FontSize: 48,
+            FontBold: 'False',
+            Align: 'LEFT',
+            Border: 'False',
+          },
+        })
+        log(viewer, `Add Annotation (request ${requestId})`)
+      }
+
+      function addUneditable(viewer) {
+        const requestId = viewer.requestSeq++
+        const step = viewer.uneditableSeq++
+        viewer.pendingUneditable.add(requestId)
+        post(viewer, {
+          type: 'add-annotation',
+          requestId,
+          dpi: 300,
+          annotation: {
+            type: 'Uneditable',
+            stampType: 'UneditableAnnotation',
+            text: 'Uneditable annotation',
+            left: 200,
+            top: 420 + step * 80,
+            width: 780,
+            height: 160,
+            pageIndex: 0,
+            fontSize: 42,
+            fontWeight: 'bold',
+            isFill: true,
+            fillColor: '#fff3a1',
+            isStroke: true,
+            strokeColor: '#1f3a68',
+            strokeWidth: 2,
+          },
+        })
+        log(viewer, `Add Uneditable Annotation (request ${requestId})`)
+      }
+
+      function burnAnnotations(viewer) {
+        const requestId = viewer.requestSeq++
+        post(viewer, { type: 'burn-annotations', requestId })
+        log(viewer, `Burn annotations (request ${requestId})`)
+      }
+
+      /** One command removes one overlay. This loops the ids the viewer handed back, so one click clears them. */
+      function removeUneditable(viewer) {
+        for (const annotationId of [...viewer.uneditableIds]) {
+          const requestId = viewer.requestSeq++
+          post(viewer, { type: 'remove-uneditable-annotation', annotationId, requestId })
+          log(viewer, `Remove uneditable annotation ${annotationId} (request ${requestId})`)
+        }
+      }
+
+      /** Applies samples/margins-1inch.json to this viewer's open document. `margins: null` would clear the guides. */
+      async function setDocumentMargins(viewer) {
+        if (!viewer.ready) return
+        const rules = await loadOneInchMargins()
+        if (!viewer.ready) return
+        post(viewer, { type: 'set-margins', margins: rules })
+        log(viewer, 'Set margins')
+      }
+
+      function mountViewer(viewerId, sampleId) {
+        const iframe = document.createElement('iframe')
+        iframe.title = sampleId || 'Add Image'
+        iframe.src = `/?viewerId=${encodeURIComponent(viewerId)}`
+        framesEl.appendChild(iframe)
+
+        const tab = document.createElement('button')
+        tab.type = 'button'
+        tab.textContent = sampleId || 'Add Image'
+        tab.addEventListener('click', () => selectViewer(viewerId))
+        const addTab = tabsEl.querySelector('.add')
+        tabsEl.insertBefore(tab, addTab)
+
+        const card = document.createElement('article')
+        card.className = 'card'
+        card.innerHTML = `
+          <h2><button type="button"></button></h2>
+          <h3>Document</h3>
+          <div class="samples"></div>
+          <div class="actions">
+            <label class="file">
+              <span class="file-label">Upload Image</span>
+              <input class="replace-image" type="file" accept=".tif,.tiff,.pdf,image/tiff,application/pdf" />
+            </label>
+            <button type="button" class="set-margins" disabled>Set margins</button>
+          </div>
+          <h3>Annotations</h3>
+          <div class="actions">
+            <button type="button" class="primary add-annotation" disabled>Add Editable Annotation</button>
+            <button type="button" class="add-uneditable" disabled>Add Uneditable Annotation</button>
+            <button type="button" class="remove-uneditable" disabled>Remove Uneditable Annotations</button>
+            <button type="button" class="burn-annotations" disabled>Burn annotations</button>
+          </div>
+          <h3>Events</h3>
+          <pre class="log"></pre>
+        `
+        const samplesEl = card.querySelector('.samples')
+        for (const id of SAMPLES) {
+          const button = document.createElement('button')
+          button.type = 'button'
+          button.dataset.id = id
+          button.textContent = id
+          button.addEventListener('click', () => {
+            selectViewer(viewerId)
+            openSample(viewer, id)
+          })
+          samplesEl.appendChild(button)
+        }
+        cardsEl.appendChild(card)
+
+        const viewer = {
+          id: viewerId,
+          sampleId,
+          iframe,
+          tab,
+          card,
+          logEl: card.querySelector('.log'),
+          fileLabel: card.querySelector('.file-label'),
+          addAnnotationBtn: card.querySelector('.add-annotation'),
+          addUneditableBtn: card.querySelector('.add-uneditable'),
+          removeUneditableBtn: card.querySelector('.remove-uneditable'),
+          burnAnnotationsBtn: card.querySelector('.burn-annotations'),
+          setMarginsBtn: card.querySelector('.set-margins'),
+          openId: null,
+          ready: false,
+          hasImage: false,
+          loadSeq: 0,
+          requestSeq: 1,
+          uneditableSeq: 0,
+          uneditableIds: [],
+          pendingUneditable: new Set(),
+        }
+        card.querySelector('h2 button').textContent = sampleId || 'Add Image'
+        card.querySelector('h2 button').addEventListener('click', () => selectViewer(viewerId))
+        if (sampleId) card.querySelector(`.samples button[data-id="${sampleId}"]`).classList.add('active')
+        card.querySelector('.replace-image').addEventListener('change', (event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          if (file) replaceWithFile(viewer, file)
+        })
+        viewer.addAnnotationBtn.addEventListener('click', () => addAnnotation(viewer))
+        viewer.addUneditableBtn.addEventListener('click', () => addUneditable(viewer))
+        viewer.removeUneditableBtn.addEventListener('click', () => removeUneditable(viewer))
+        viewer.burnAnnotationsBtn.addEventListener('click', () => burnAnnotations(viewer))
+        viewer.setMarginsBtn.addEventListener('click', () => void setDocumentMargins(viewer))
+        viewers.push(viewer)
+        iframe.addEventListener('load', () => {
+          if (viewer.sampleId) openSample(viewer, viewer.sampleId)
+        })
+        return viewer
+      }
+
+      function addImage() {
+        if (addedImage) return
+        addedImage = true
+        tabsEl.querySelector('.add').remove()
+        const viewer = mountViewer('4', null)
+        selectViewer(viewer.id)
+      }
+
+      window.addEventListener('message', (event) => {
+        const data = event.data
+        if (!data || data.source !== TARGET) return
+        const viewer = viewers.find((item) => item.iframe.contentWindow === event.source)
+        if (!viewer) return
+        if (data.type === 'document-loaded') {
+          viewer.uneditableIds.length = 0
+          viewer.pendingUneditable.clear()
+          setHasImage(viewer, true)
+          setReady(viewer, data.id === viewer.openId)
+          log(viewer, `document-loaded ${data.id ?? ''}`)
+        } else if (data.type === 'dirty-change') {
+          log(viewer, `dirty-change ${data.dirty ? 'dirty' : 'clean'}`)
+        } else if (data.type === 'file-dropped') {
+          replaceWithFile(viewer, new File([data.buffer], data.name))
+        } else if (data.type === 'save-requested') {
+          saved.set(`${viewer.id}:${data.id}`, data.buffer)
+          log(viewer, `save-requested ${data.id} (${(data.buffer.byteLength / 1e6).toFixed(2)} MB)`)
+          post(viewer, { type: 'save-acked', id: data.id })
+        } else if (data.type === 'document-saved') {
+          log(viewer, `document-saved ${data.id}`)
+        } else if (data.type === 'annotation-result') {
+          if (
+            viewer.ready &&
+            data.status === 'Success' &&
+            viewer.pendingUneditable.has(data.requestId) &&
+            typeof data.annotationId === 'number'
+          ) {
+            viewer.uneditableIds.push(data.annotationId)
+          }
+          viewer.pendingUneditable.delete(data.requestId)
+          syncRemoveButton(viewer)
+          const id = data.annotationId == null ? '' : ` (id ${data.annotationId})`
+          log(viewer, `annotation-result ${data.status}: ${data.message}${id}`)
+        } else if (data.type === 'uneditable-annotation-removed') {
+          if (data.status === 'Success') {
+            const index = viewer.uneditableIds.indexOf(data.annotationId)
+            if (index >= 0) viewer.uneditableIds.splice(index, 1)
+          }
+          syncRemoveButton(viewer)
+          const id = data.annotationId == null ? '' : `id ${data.annotationId}, `
+          log(viewer, `uneditable-annotation-removed ${data.status}: ${data.message} (${id}${data.remaining} left)`)
+        } else if (data.type === 'annotations-burned') {
+          if (data.status === 'Success') {
+            viewer.uneditableIds.length = 0
+            syncRemoveButton(viewer)
+          }
+          const count = data.annotations?.length ?? 0
+          log(viewer, `annotations-burned ${data.status}: ${data.message} (${count})`)
+        }
+      })
+
+      const addTab = document.createElement('button')
+      addTab.type = 'button'
+      addTab.className = 'add'
+      addTab.textContent = 'Add Image'
+      addTab.addEventListener('click', addImage)
+      tabsEl.appendChild(addTab)
+
+      mountViewer('1', 'single-page')
+      mountViewer('2', 'multi-page')
+      mountViewer('3', 'skewed')
+      selectViewer('1')
+    </script>
+  </body>
+</html>

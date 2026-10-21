@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sample host</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        color: #1d2635;
+        font: 14px/1.4 Arial, Helvetica, sans-serif;
+      }
+      .host {
+        box-sizing: border-box;
+        width: 40%;
+        padding: 16px 18px;
+        overflow: auto;
+        background: #fff;
+        border-right: 1px solid #c9d1dd;
+      }
+      .viewer {
+        width: 60%;
+        background: #5a5a5a;
+      }
+      iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 18px;
+      }
+      p {
+        margin: 0 0 14px;
+        color: #4a5568;
+      }
+      h2 {
+        margin: 16px 0 8px;
+        font-size: 13px;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: #6b7686;
+      }
+      .samples,
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      button {
+        padding: 7px 12px;
+        border: 1px solid #c9d1dd;
+        border-radius: 4px;
+        background: #fff;
+        color: #1f3a68;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) {
+        background: #f4f6f9;
+      }
+      button.active {
+        background: #e8eef8;
+        border-color: #2f6fd1;
+      }
+      button.primary {
+        background: #3d64b5;
+        border-color: #3d64b5;
+        color: #fff;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      label.file {
+        display: inline-block;
+        padding: 7px 12px;
+        border: 1px solid #c9d1dd;
+        border-radius: 4px;
+        background: #fff;
+        color: #1f3a68;
+        cursor: pointer;
+      }
+      label.file:hover {
+        background: #f4f6f9;
+      }
+      label.file input {
+        display: none;
+      }
+      #log {
+        margin: 0;
+        padding: 8px 10px;
+        min-height: 8em;
+        max-height: 40vh;
+        overflow: auto;
+        background: #f4f6f9;
+        border: 1px solid #c9d1dd;
+        border-radius: 4px;
+        font-family: Consolas, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="host">
+      <h1>Sample host</h1>
+      <p>
+        Loads a TIFF from <code>samples/</code> and sends it to the viewer the way a hosting app would. Upload Image
+        opens a PDF or TIFF when none is open; after that the button is Replace Image. Set
+        <code>tiffHostLoadImage</code> to load that file from your own API instead.
+      </p>
+
+      <h2>Documents</h2>
+      <div class="samples" id="samples"></div>
+      <div class="actions">
+        <label class="file">
+          <span id="file-label">Upload Image</span>
+          <input id="replace-image" type="file" accept=".tif,.tiff,.pdf,image/tiff,application/pdf" />
+        </label>
+        <button type="button" id="set-margins" disabled>Set margins</button>
+      </div>
+
+      <h2>Annotations</h2>
+      <div class="actions">
+        <button type="button" id="add-annotation" class="primary" disabled>Add Editable Annotation</button>
+        <button type="button" id="add-uneditable" disabled>Add Uneditable Annotation</button>
+        <button type="button" id="remove-uneditable" disabled>Remove Uneditable Annotations</button>
+        <button type="button" id="burn-annotations" disabled>Burn annotations</button>
+      </div>
+
+      <h2>Events</h2>
+      <pre id="log"></pre>
+    </section>
+    <section class="viewer">
+      <iframe id="viewer" title="TIFF image viewer" src="/"></iframe>
+    </section>
+    <script type="module">
+      import { loadUploadedImage } from './loadImage.js'
+      const TARGET = 'tiff-image-viewer'
+      const SAMPLES = ['single-page', 'multi-page', 'skewed', 'speckled']
+      const viewer = document.getElementById('viewer')
+      const logEl = document.getElementById('log')
+      const addAnnotationBtn = document.getElementById('add-annotation')
+      const addUneditableBtn = document.getElementById('add-uneditable')
+      const removeUneditableBtn = document.getElementById('remove-uneditable')
+      const burnAnnotationsBtn = document.getElementById('burn-annotations')
+      const setMarginsBtn = document.getElementById('set-margins')
+      const fileLabel = document.getElementById('file-label')
+
+      /** Latest TIFF the viewer asked us to store, keyed by document id. */
+      const saved = new Map()
+      let margins = null
+      let openId = null
+      let ready = false
+      /** True once the viewer has an image. The file button is Upload Image until then. */
+      let hasImage = false
+      let requestSeq = 1
+      let uneditableSeq = 0
+      let loadSeq = 0
+      /** annotationIds of uneditable overlays still on the page (from annotation-result). */
+      const uneditableIds = []
+      /** requestIds of uneditable adds waiting for annotation-result. */
+      const pendingUneditable = new Set()
+
+      function log(line) {
+        logEl.textContent = `${line}\n${logEl.textContent}`.slice(0, 4000)
+      }
+
+      function post(message, transfer) {
+        const frame = viewer.contentWindow
+        if (!frame) return
+        frame.postMessage({ target: TARGET, ...message }, location.origin, transfer)
+      }
+
+      function syncRemoveButton() {
+        removeUneditableBtn.disabled = !ready || uneditableIds.length === 0
+      }
+
+      function setHasImage(next) {
+        hasImage = next
+        fileLabel.textContent = next ? 'Replace Image' : 'Upload Image'
+      }
+
+      function setReady(next) {
+        ready = next
+        if (!next) {
+          uneditableIds.length = 0
+          pendingUneditable.clear()
+        }
+        addAnnotationBtn.disabled = !next
+        addUneditableBtn.disabled = !next
+        burnAnnotationsBtn.disabled = !next
+        setMarginsBtn.disabled = !next
+        syncRemoveButton()
+      }
+
+      async function loadMargins() {
+        if (margins) return margins
+        const response = await fetch('/samples/margins.json')
+        if (!response.ok) return null
+        margins = await response.json()
+        return margins
+      }
+
+      async function openSample(id) {
+        const request = ++loadSeq
+        setReady(false)
+        openId = id
+        for (const button of document.querySelectorAll('.samples button')) {
+          button.classList.toggle('active', button.dataset.id === id)
+        }
+        log(`Loading ${id}…`)
+        post({ type: 'image-loading', id })
+        try {
+          const stored = saved.get(id)
+          const buffer = stored ? stored.slice(0) : await (await fetch(`/samples/${id}.tif`)).arrayBuffer()
+          if (buffer.byteLength === 0) throw new Error(`${id}.tif was empty or missing`)
+          const rules = await loadMargins()
+          if (request !== loadSeq) return
+          post(
+            {
+              type: 'open-image',
+              id,
+              name: `${id}.tif`,
+              buffer,
+              margins: rules,
+              dpiRequirement: 300,
+            },
+            [buffer],
+          )
+        } catch (err) {
+          log(`Could not open ${id}: ${err instanceof Error ? err.message : err}`)
+        }
+      }
+
+      /** Opens a file from disk. The document key stays unless `tiffHostLoadImage` returns one. */
+      async function replaceWithFile(file) {
+        const request = ++loadSeq
+        const id = openId
+        log(`${hasImage ? 'Replacing' : 'Uploading'} ${file.name}…`)
+        try {
+          const loaded = await loadUploadedImage(file)
+          if (request !== loadSeq) return
+          const nextId = loaded.id !== undefined ? (loaded.id == null || loaded.id === '' ? null : String(loaded.id)) : id
+          openId = nextId
+          const rules = await loadMargins()
+          if (request !== loadSeq) return
+          setReady(false)
+          for (const button of document.querySelectorAll('.samples button')) button.classList.remove('active')
+          post({ type: 'image-loading', id: nextId })
+          post(
+            {
+              type: 'open-image',
+              id: nextId,
+              name: loaded.name,
+              buffer: loaded.buffer,
+              margins: rules,
+              dpiRequirement: 300,
+            },
+            [loaded.buffer],
+          )
+        } catch (err) {
+          if (request === loadSeq) log(`Could not replace image: ${err instanceof Error ? err.message : err}`)
+        }
+      }
+
+      function addAnnotation() {
+        const requestId = requestSeq++
+        post({
+          type: 'add-annotation',
+          requestId,
+          dpi: 300,
+          annotation: {
+            type: 'Editable',
+            Text: 'Sample annotation',
+            XPos: 150,
+            YPos: 200,
+            Width: 900,
+            Height: 160,
+            FontSize: 48,
+            FontBold: 'False',
+            Align: 'LEFT',
+            Border: 'False',
+          },
+        })
+        log(`Add Annotation (request ${requestId})`)
+      }
+
+      function addUneditable() {
+        const requestId = requestSeq++
+        const step = uneditableSeq++
+        pendingUneditable.add(requestId)
+        post({
+          type: 'add-annotation',
+          requestId,
+          dpi: 300,
+          annotation: {
+            type: 'Uneditable',
+            stampType: 'UneditableAnnotation',
+            text: 'Uneditable annotation',
+            left: 200,
+            top: 420 + step * 80,
+            width: 780,
+            height: 160,
+            pageIndex: 0,
+            fontSize: 42,
+            fontWeight: 'bold',
+            isFill: true,
+            fillColor: '#fff3a1',
+            isStroke: true,
+            strokeColor: '#1f3a68',
+            strokeWidth: 2,
+          },
+        })
+        log(`Add Uneditable Annotation (request ${requestId})`)
+      }
+
+      function burnAnnotations() {
+        const requestId = requestSeq++
+        post({ type: 'burn-annotations', requestId })
+        log(`Burn annotations (request ${requestId})`)
+      }
+
+      /** One command removes one overlay. This loops the ids the viewer handed back, so one click clears them. */
+      function removeUneditable() {
+        for (const annotationId of [...uneditableIds]) {
+          const requestId = requestSeq++
+          post({ type: 'remove-uneditable-annotation', annotationId, requestId })
+          log(`Remove uneditable annotation ${annotationId} (request ${requestId})`)
+        }
+      }
+
+      /** Applies samples/margins.json to the open document. `margins: null` would clear the guides. */
+      async function setDocumentMargins() {
+        if (!ready) return
+        const rules = await loadMargins()
+        if (!ready) return
+        post({ type: 'set-margins', margins: rules })
+        log('Set margins')
+      }
+
+      window.addEventListener('message', (event) => {
+        if (event.source !== viewer.contentWindow) return
+        const data = event.data
+        if (!data || data.source !== TARGET) return
+        if (data.type === 'document-loaded') {
+          uneditableIds.length = 0
+          pendingUneditable.clear()
+          setHasImage(true)
+          setReady(data.id === openId)
+          log(`document-loaded ${data.id ?? ''}`)
+        } else if (data.type === 'dirty-change') {
+          log(`dirty-change ${data.dirty ? 'dirty' : 'clean'}`)
+        } else if (data.type === 'file-dropped') {
+          replaceWithFile(new File([data.buffer], data.name))
+        } else if (data.type === 'save-requested') {
+          saved.set(data.id, data.buffer)
+          log(`save-requested ${data.id} (${(data.buffer.byteLength / 1e6).toFixed(2)} MB)`)
+          post({ type: 'save-acked', id: data.id })
+        } else if (data.type === 'document-saved') {
+          log(`document-saved ${data.id}`)
+        } else if (data.type === 'annotation-result') {
+          if (ready && data.status === 'Success' && pendingUneditable.has(data.requestId) && typeof data.annotationId === 'number') {
+            uneditableIds.push(data.annotationId)
+          }
+          pendingUneditable.delete(data.requestId)
+          syncRemoveButton()
+          const id = data.annotationId == null ? '' : ` (id ${data.annotationId})`
+          log(`annotation-result ${data.status}: ${data.message}${id}`)
+        } else if (data.type === 'uneditable-annotation-removed') {
+          if (data.status === 'Success') {
+            const index = uneditableIds.indexOf(data.annotationId)
+            if (index >= 0) uneditableIds.splice(index, 1)
+          }
+          syncRemoveButton()
+          const id = data.annotationId == null ? '' : `id ${data.annotationId}, `
+          log(`uneditable-annotation-removed ${data.status}: ${data.message} (${id}${data.remaining} left)`)
+        } else if (data.type === 'annotations-burned') {
+          if (data.status === 'Success') {
+            uneditableIds.length = 0
+            syncRemoveButton()
+          }
+          const count = data.annotations?.length ?? 0
+          log(`annotations-burned ${data.status}: ${data.message} (${count})`)
+        }
+      })
+
+      const samplesEl = document.getElementById('samples')
+      for (const id of SAMPLES) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.dataset.id = id
+        button.textContent = id
+        button.addEventListener('click', () => openSample(id))
+        samplesEl.appendChild(button)
+      }
+      addAnnotationBtn.addEventListener('click', addAnnotation)
+      addUneditableBtn.addEventListener('click', addUneditable)
+      removeUneditableBtn.addEventListener('click', removeUneditable)
+      burnAnnotationsBtn.addEventListener('click', burnAnnotations)
+      setMarginsBtn.addEventListener('click', () => void setDocumentMargins())
+      document.getElementById('replace-image').addEventListener('change', (event) => {
+        const file = event.target.files?.[0]
+        event.target.value = ''
+        if (file) replaceWithFile(file)
+      })
+
+      viewer.addEventListener('load', () => openSample('single-page'))
+    </script>
+  </body>
+</html>
