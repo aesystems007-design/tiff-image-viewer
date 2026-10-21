@@ -13,8 +13,11 @@ Put the built viewer in an iframe. Give each iframe its own `viewerId` when more
   id="viewer"
   title="Document image"
   src="https://viewer.example.com/?viewerId=doc-1"
+  allow="fullscreen"
 ></iframe>
 ```
+
+`allow="fullscreen"` lets the viewer's Full screen button fill the monitor. Without it the button stays in the page and reports that the host blocked full screen.
 
 A popup works too. Events are posted to `window.parent` and to `window.opener`.
 

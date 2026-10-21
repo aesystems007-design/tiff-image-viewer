@@ -420,7 +420,7 @@ const actionsShift = computed(() => {
 
 /** Guides are for the page in `url`; hidden while a different page is still opening. */
 const guidesReady = ref(false)
-/** OpenSeadragon's canvas element: guides go inside it so they stay under the navigator and other controls. */
+/** OpenSeadragon's canvas element: guides go inside it so they stay with the page and under other controls. */
 const canvasEl = shallowRef<HTMLElement | null>(null)
 const guideBoxes = ref<(ScreenRect & { kind: PageGuide['kind'] })[]>([])
 
@@ -570,17 +570,7 @@ onMounted(() => {
   viewer = OpenSeadragon({
     element: container.value!,
     showNavigationControl: false,
-    showNavigator: true,
-    navigatorPosition: 'BOTTOM_RIGHT',
-    // Fixed size (not a ratio of the canvas-container — that made the minimap huge in Best Fit / Full Size).
-    navigatorWidth: 90,
-    navigatorHeight: 112,
-    navigatorBackground: '#f4f6f9',
-    navigatorBorderColor: '#c9d1dd',
-    // OSD defaults to 0.8 opacity + autofade; that made the page icon look washed out over the page.
-    navigatorOpacity: 1,
-    navigatorAutoFade: false,
-    navigatorDisplayRegionColor: '#2f6fd1',
+    showNavigator: false,
 
     // Image always fills `.canvas-container` (like the old viewer scaling to its canvas).
     visibilityRatio: 1,
@@ -943,7 +933,6 @@ defineExpose({
   margin: 0;
   border: 1px solid #000;
   background: #fff;
-  /* Keep the navigator inside the page (OSD anchors it to the viewer corner). */
   overflow: hidden;
 }
 
@@ -955,17 +944,6 @@ defineExpose({
 
 .osd-viewer :deep(canvas) {
   filter: var(--image-filter, none);
-}
-
-/* Solid page icon: don't let brightness/contrast or OSD fade wash the minimap. */
-.osd-viewer :deep(.navigator) {
-  opacity: 1 !important;
-  background: #f4f6f9 !important;
-  border: 1px solid #c9d1dd !important;
-}
-
-.osd-viewer :deep(.navigator canvas) {
-  filter: none;
 }
 
 .guides {

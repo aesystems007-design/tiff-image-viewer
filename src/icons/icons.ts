@@ -45,6 +45,8 @@ export const ICONS = {
   'fit-page': stroke('<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>'),
   'fit-width': stroke('<path d="M8 4v16M16 4v16M8 12H2.5M5 9 2.5 12 5 15M16 12h5.5M19 9l2.5 3L19 15"/>'),
   'fit-actual': stroke('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
+  fullscreen: stroke('<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/><path d="m4 4 4.5 4.5M20 4l-4.5 4.5M4 20l4.5-4.5M20 20l-4.5-4.5"/>'),
+  'fullscreen-exit': stroke('<path d="M4 9h5V4M15 9h5V4M4 15h5v5M15 15h5v5"/><path d="m9 9-4.5-4.5M15 9l4.5-4.5M9 15l-4.5 4.5M15 15l4.5 4.5"/>'),
   letter: stroke('<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/><path d="M10 12h6M10 16h6"/>'),
   legal: stroke('<path d="M8 2h6l4 4v16H8z"/><path d="M14 2v4h4"/>'),
   'white-out': stroke('<path d="M5 3h14v18H5z"/><path d="M5 3h14v4H5z" fill="currentColor" stroke="none"/>'),

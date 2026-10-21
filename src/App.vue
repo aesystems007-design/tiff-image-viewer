@@ -81,6 +81,8 @@ const error = ref<string | null>(null)
 const dragging = ref(false)
 const thumbnailsVisible = ref(true)
 const fitMode = ref<FitMode | null>(DEFAULT_FIT_MODE)
+/** The viewer is showing on the whole screen. Off until the toolbar button turns it on. */
+const fullscreen = ref(false)
 const zoomPercent = ref<number | null>(null)
 const brightness = ref(100)
 const contrast = ref(100)
@@ -1068,6 +1070,28 @@ function fit(mode: FitMode) {
   viewer.value?.fit(mode)
 }
 
+function syncFullscreen() {
+  fullscreen.value = document.fullscreenElement !== null
+}
+
+/** Shows the viewer on the whole screen, or returns to the host page. Fit mode stays as it is. */
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen()
+      return
+    }
+    await document.documentElement.requestFullscreen()
+  } catch {
+    showNotice(
+      isHosted()
+        ? 'Full screen is blocked. The host page must allow it on the viewer frame.'
+        : 'Could not enter full screen.',
+      NOTICE_MS,
+    )
+  }
+}
+
 /** Manual zooming leaves fit mode, so the zoom level is kept across rotations. */
 function zoom(action: (target: InstanceType<typeof OsdViewer>) => void) {
   fitMode.value = null
@@ -1159,6 +1183,7 @@ let stopListeningToHost = () => {}
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
+  document.addEventListener('fullscreenchange', syncFullscreen)
   stopListeningToHost = listenToHost((command) => {
     switch (command.type) {
       case 'image-loading':
@@ -1214,6 +1239,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('fullscreenchange', syncFullscreen)
   stopListeningToHost()
   window.clearTimeout(noticeTimer)
   window.clearTimeout(warningTimer)
@@ -1239,6 +1265,7 @@ onBeforeUnmount(() => {
       :has-changes="edits.hasChanges.value"
       :saves-to-server="documentId !== null"
       :fit-mode="fitMode"
+      :fullscreen="fullscreen"
       :zoom-percent="zoomPercent"
       :selected-count="selection.count.value"
       :select-area-active="selectAreaMode"
@@ -1273,6 +1300,7 @@ onBeforeUnmount(() => {
       @white-out-margins="whiteOutMargins"
       @deskew-pages="deskewPages"
       @fit="fit"
+      @toggle-fullscreen="toggleFullscreen"
       @go-to-page="goToPosition"
       @zoom-in="zoom((v) => v.zoomIn())"
       @zoom-out="zoom((v) => v.zoomOut())"

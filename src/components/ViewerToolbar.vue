@@ -16,6 +16,8 @@ const props = defineProps<{
   /** The document came from the server, so Apply saves a new version there. */
   savesToServer: boolean
   fitMode: FitMode | null
+  /** The viewer document is showing on the whole screen. */
+  fullscreen: boolean
   zoomPercent: number | null
   /** Pages selected in the thumbnail sidebar; "current page" actions apply to all of them. */
   selectedCount: number
@@ -74,6 +76,7 @@ const emit = defineEmits<{
   /** Measures and straightens the skew of the selected pages (or all pages). */
   (e: 'deskew-pages', all: boolean): void
   (e: 'fit', mode: FitMode): void
+  (e: 'toggle-fullscreen'): void
   (e: 'go-to-page', page: number): void
   (e: 'zoom-in'): void
   (e: 'zoom-out'): void
@@ -332,6 +335,13 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         :active="hasDoc && fitMode === fit.mode"
         :disabled="!hasDoc"
         @click="emit('fit', fit.mode)"
+      />
+      <ToolButton
+        :icon="fullscreen ? 'fullscreen-exit' : 'fullscreen'"
+        :title="fullscreen ? 'Exit full screen (Esc)' : 'Full screen'"
+        :active="fullscreen"
+        :disabled="!hasDoc && !fullscreen"
+        @click="emit('toggle-fullscreen')"
       />
       <span class="divider" />
 
