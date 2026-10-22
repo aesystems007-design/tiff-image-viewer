@@ -2,7 +2,7 @@
 
 Browser viewer for single-page and multipage TIFF files. The hosting page owns storage. It embeds the viewer, pushes TIFF bytes in, and stores the file when the user clicks Apply. Everything in the viewer runs in the browser. There is no viewer backend.
 
-The host and the viewer talk with `window.postMessage`. Commands go in. Events come out. Working copies of a host are `examples/host.html` (one viewer) and `examples/tabs.html` (several viewers in tabs). The HTTP API the host calls, with a bearer token, is in [README.dotnet.md](README.dotnet.md).
+The host and the viewer talk with `window.postMessage`. Commands go in. Events come out. Working copies of a host are `examples/host.html` (one viewer) and `examples/tabs.html` (several viewers in tabs). The HTTP API the host calls, with a bearer token, is in [README.dotnet.md](README.dotnet.md).th
 
 ## Embed the viewer
 
@@ -614,20 +614,24 @@ With nothing to burn, or with no document open, the status is `Error` and `annot
 
 ## Icons
 
-Built-in toolbar icons can be replaced by name. A value is an image URL (`https:`, a site path, or `data:image/…`) or one `<svg>` element. `null` or `""` restores the built-in icon. Unknown names are ignored. SVG overrides are sanitized: scripts and event handlers are dropped.
+Built-in toolbar icons can be replaced by name. A value is an image URL (`https:`, a site path, or `data:image/…`), one `<svg>` element, or one Font Awesome `<i>` tag. `null` or `""` restores the built-in icon. Unknown names are ignored. SVG and `<i>` overrides are sanitized: scripts, event handlers, and anything other than the icon element are dropped. An `<i>` keeps its `class` only.
 
 ```json
 {
   "target": "tiff-image-viewer",
   "type": "set-icons",
+  "iconFont": "https://company.example/fontawesome/css/all.min.css",
   "icons": {
-    "print": "/icons/print.svg",
-    "trash": null
+    "print": "<i class=\"fa-solid fa-print\"></i>",
+    "trash": "/icons/trash.png",
+    "download": null
   }
 }
 ```
 
-The same map can be set as `window.tiffViewerIcons` before the viewer script runs.
+`iconFont` is the company's Font Awesome stylesheet, or a kit script URL (a path ending in `.js`). It is loaded inside the viewer, so the host page's own Font Awesome does not have to be visible to the iframe. Omit `iconFont` to leave the current font in place. `null` removes it. An `<i>` draws nothing until that font is loaded.
+
+The same map can be set as `window.tiffViewerIcons` before the viewer script runs, and the font URL as `window.tiffViewerIconFont`.
 
 Names: `sidebar`, `undo`, `print`, `download`, `insert`, `stamp`, `scan`, `trash`, `rotate-left`, `rotate-right`, `move-down`, `move-up`, `select-area`, `brightness`, `contrast`, `despeckle`, `scale-up`, `scale-down`, `spinner`, `caret-left`, `caret-right`, `zoom-in`, `zoom-out`, `fit-page`, `fit-width`, `fit-actual`, `letter`, `legal`, `white-out`, `eraser`, `reposition`, `deskew`, `warning`, `chevron-down`, `checkbox`, `checkbox-on`, `bold`, `italic`, `underline`, `font`, `align-left`, `align-center`, `align-right`, `edit`, `close`.
 
@@ -679,7 +683,7 @@ Open http://localhost:5173/examples/host.html. The left side loads a TIFF from `
 | `set-margins` | `margins` | Margin rules for the open document. `null` clears the guides. |
 | `set-allowed-page-size` | `allowedPageSize`, `threshold` | `LETTER`, `LEGAL`, `LETTERLEGAL`, or `ANY`, and the inch tolerance. |
 | `set-dpi-requirement` | `dpiRequirement` | Company DPI requirement. Missing or non-positive restores 300. |
-| `set-icons` | `icons` | `{ [name]: url or svg or null }`. |
+| `set-icons` | `icons`, `iconFont?` | Image URL, `<svg>`, Font Awesome `<i>`, or null, by icon name. `iconFont` is the Font Awesome CSS or kit script. |
 | `set-scan-license` | `productKey` | Dynamic Web TWAIN key. `null` hides Scan. |
 | `add-annotation` | `annotation`, `dpi?`, `requestId?` | Add one editable or uneditable overlay. |
 | `remove-uneditable-annotation` | `annotationId`, `requestId?` | Remove one uneditable overlay. |

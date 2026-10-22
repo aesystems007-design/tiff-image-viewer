@@ -143,10 +143,11 @@ export type HostCommand =
    */
   | { type: 'remove-uneditable-annotation'; annotationId: number | null; requestId: string | number | null }
   /**
-   * Replace built-in icons. Each value is an image URL or one `<svg>` element; null restores that icon.
-   * Names are the keys in `src/icons/icons.ts`.
+   * Replace built-in icons. Each value is an image URL, one `<svg>`, or one Font Awesome `<i>` tag;
+   * null restores that icon. Names are the keys in `src/icons/icons.ts`.
+   * `iconFont`, when present, is the Font Awesome stylesheet or kit script for `<i>` values (`null` removes it).
    */
-  | { type: 'set-icons'; icons: Record<string, string | null> }
+  | { type: 'set-icons'; icons: Record<string, string | null>; iconFont: string | null | undefined }
   /**
    * The company's Dynamic Web TWAIN product key. Empty or null hides the scan button.
    * The key is not echoed back in any event.
@@ -300,7 +301,11 @@ function parseCommand(data: unknown): HostCommand | null {
       if (value === null || value === '') icons[name] = null
       else if (typeof value === 'string') icons[name] = value
     }
-    return { type: 'set-icons', icons }
+    let iconFont: string | null | undefined
+    if ('iconFont' in message) {
+      iconFont = message.iconFont === null || message.iconFont === '' ? null : typeof message.iconFont === 'string' ? message.iconFont : undefined
+    }
+    return { type: 'set-icons', icons, iconFont }
   }
 
   if (message.type === 'set-scan-license') {

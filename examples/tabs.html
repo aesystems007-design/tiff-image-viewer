@@ -441,6 +441,7 @@
           <h3>Document</h3>
           <div class="samples"></div>
           <div class="actions">
+            <button type="button" class="delete-viewer">Delete viewer</button>
             <label class="file">
               <span class="file-label">Upload Image</span>
               <input class="replace-image" type="file" accept=".tif,.tiff,.pdf,image/tiff,application/pdf" />
@@ -513,11 +514,44 @@
         viewer.burnAnnotationsBtn.addEventListener('click', () => burnAnnotations(viewer))
         viewer.setMarginsBtn.addEventListener('click', () => void setDocumentMargins(viewer))
         viewer.setPageSizeBtn.addEventListener('click', () => setAllowedPageSize(viewer))
+        card.querySelector('.delete-viewer').addEventListener('click', () => deleteViewer(viewer))
         viewers.push(viewer)
         iframe.addEventListener('load', () => {
           if (viewer.sampleId) openSample(viewer, viewer.sampleId)
         })
         return viewer
+      }
+
+      function createAddTab() {
+        const addTab = document.createElement('button')
+        addTab.type = 'button'
+        addTab.className = 'add'
+        addTab.textContent = 'Add Image'
+        addTab.addEventListener('click', addImage)
+        tabsEl.appendChild(addTab)
+      }
+
+      /** Removes the selected viewer: its tab, its frame, and the controls on the left. */
+      function deleteViewer(viewer) {
+        viewer.loadSeq++
+        const index = viewers.indexOf(viewer)
+        if (index < 0) return
+        viewers.splice(index, 1)
+        for (const key of [...saved.keys()]) {
+          if (key.startsWith(`${viewer.id}:`)) saved.delete(key)
+        }
+        viewer.iframe.remove()
+        viewer.tab.remove()
+        viewer.card.remove()
+        if (viewer.sampleId == null) {
+          addedImage = false
+          if (!tabsEl.querySelector('.add')) createAddTab()
+        }
+        if (activeId === viewer.id) {
+          const next = viewers[index] ?? viewers[index - 1]
+          if (next) selectViewer(next.id)
+          else activeId = null
+        }
       }
 
       function addImage() {
@@ -580,12 +614,7 @@
         }
       })
 
-      const addTab = document.createElement('button')
-      addTab.type = 'button'
-      addTab.className = 'add'
-      addTab.textContent = 'Add Image'
-      addTab.addEventListener('click', addImage)
-      tabsEl.appendChild(addTab)
+      createAddTab()
 
       mountViewer('1', 'single-page')
       mountViewer('2', 'multi-page')

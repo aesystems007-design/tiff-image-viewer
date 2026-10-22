@@ -27,7 +27,7 @@ import {
   type UneditableAnnotation,
 } from './host/uneditableAnnotation'
 import { initialDocumentId, isHosted, listenToHost, notifyHost, type BurnedAnnotation, type HostCommand } from './host/hostBridge'
-import { setIcons } from './icons/registry'
+import { setIconFont, setIcons } from './icons/registry'
 import { canScan, setScanLicense } from './scan/license'
 import {
   legacyAnnotationBorder,
@@ -1265,6 +1265,7 @@ onMounted(() => {
         break
       case 'set-icons':
         setIcons(command.icons)
+        if (command.iconFont !== undefined) setIconFont(command.iconFont)
         break
       case 'set-scan-license':
         setScanLicense(command.productKey)

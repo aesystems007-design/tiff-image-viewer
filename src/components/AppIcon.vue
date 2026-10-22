@@ -13,13 +13,14 @@ const view = computed(() => {
   const override = iconOverrides[props.name]
   if (!override) return { kind: 'svg' as const, value: builtinIcon(props.name) }
   if (override.startsWith('url:')) return { kind: 'url' as const, value: override.slice(4) }
+  if (override.startsWith('<i')) return { kind: 'font' as const, value: override }
   return { kind: 'svg' as const, value: override }
 })
 </script>
 
 <template>
   <img v-if="view.kind === 'url'" class="app-icon" :class="{ spin }" :src="view.value" alt="" />
-  <span v-else class="app-icon" :class="{ spin }" v-html="view.value" />
+  <span v-else class="app-icon" :class="{ spin, font: view.kind === 'font' }" v-html="view.value" />
 </template>
 
 <style scoped>
@@ -35,6 +36,17 @@ const view = computed(() => {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* Font Awesome `<i>` sizes with the toolbar. Don't set font-family; the company's CSS does. */
+.app-icon.font {
+  width: auto;
+  height: 1em;
+}
+
+.app-icon.font :deep(i) {
+  font-style: normal;
+  line-height: 1;
 }
 
 .spin {
