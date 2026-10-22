@@ -573,6 +573,10 @@ onMounted(() => {
     showNavigator: false,
 
     // Image always fills `.canvas-container` (like the old viewer scaling to its canvas).
+    // OSD's own resize keeps the previous zoom, scaled by how the box's diagonal changed.
+    // A shorter page (Legal → Letter in Fit Width) then sits inset inside the border.
+    // syncCanvas sizes the viewport itself whenever the box changes.
+    autoResize: false,
     visibilityRatio: 1,
     minZoomImageRatio: 1,
     constrainDuringPan: true,

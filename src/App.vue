@@ -15,6 +15,7 @@ import ThumbnailSidebar from './components/ThumbnailSidebar.vue'
 import ViewerToolbar from './components/ViewerToolbar.vue'
 import { movePagesWithin, usePageEdits } from './composables/usePageEdits'
 import { usePageSelection } from './composables/usePageSelection'
+import { setActionBrands } from './host/actionBrand'
 import { ANY_PAGE_SIZE, pageMatchesAllowedSize, pageSizeWarningDetail, type AllowedPageSizeRule } from './host/allowedPageSize'
 import { dpiRequirement, pageRectToRequirement, requirementRectToPage, setDpiRequirement } from './host/dpiRequirement'
 import {
@@ -1266,6 +1267,9 @@ onMounted(() => {
       case 'set-icons':
         setIcons(command.icons)
         if (command.iconFont !== undefined) setIconFont(command.iconFont)
+        break
+      case 'set-actions':
+        setActionBrands(command)
         break
       case 'set-scan-license':
         setScanLicense(command.productKey)

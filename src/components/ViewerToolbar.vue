@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { actionBrands } from '../host/actionBrand'
 import { SCALE_STEP, type PaperSize } from '../tiff/pageOps'
 import type { FitMode } from '../viewer/fitMode'
 import AppIcon from './AppIcon.vue'
@@ -126,6 +127,15 @@ function commitZoomInput() {
   const percent = Number.parseFloat(zoomInput.value)
   if (Number.isFinite(percent) && percent > 0) emit('set-zoom', percent)
   else zoomInput.value = props.zoomPercent === null ? '' : String(Math.round(props.zoomPercent))
+}
+
+/** Company colors, when set. Unset fields keep the built-in Apply / Cancel colors. */
+function brandStyle(name: 'apply' | 'cancel') {
+  const brand = actionBrands[name]
+  const style: Record<string, string> = {}
+  if (brand.background) style.backgroundColor = brand.background
+  if (brand.color) style.color = brand.color
+  return style
 }
 
 const conversions = computed(() => [
@@ -257,13 +267,23 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
       <button
         type="button"
         class="text-button apply"
-        :title="savesToServer ? 'Apply the changes and save the new version to the server' : 'Apply the changes'"
+        :style="brandStyle('apply')"
+        :title="actionBrands.apply.title ?? (savesToServer ? 'Apply the changes and save the new version to the server' : 'Apply the changes')"
         :disabled="!hasChanges"
         @click="emit('apply')"
       >
-        Apply
+        {{ actionBrands.apply.label ?? 'Apply' }}
       </button>
-      <button type="button" class="text-button cancel" :disabled="!hasChanges" @click="emit('cancel')">Cancel</button>
+      <button
+        type="button"
+        class="text-button cancel"
+        :style="brandStyle('cancel')"
+        :title="actionBrands.cancel.title || undefined"
+        :disabled="!hasChanges"
+        @click="emit('cancel')"
+      >
+        {{ actionBrands.cancel.label ?? 'Cancel' }}
+      </button>
       <span class="divider" />
 
       <ToolButton

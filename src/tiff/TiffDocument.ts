@@ -7,6 +7,8 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 interface Pending {
   resolve: (response: WorkerResponse) => void
   reject: (error: Error) => void
+  /** Thumbnail job: the next thumbnail is queued before background work (warning scans) can start. */
+  thumbnail?: boolean
 }
 
 interface Thumbnail {
@@ -63,6 +65,8 @@ export class TiffDocument {
   private thumbnails = new Map<string, Thumbnail>()
   private thumbnailQueue: string[] = []
   private thumbnailInFlight = false
+  /** Page the sidebar is showing; the closest queued thumbnail runs next. */
+  private focusPage = 0
   private disposed = false
   /** One worker request at a time; renders jump ahead of warning scans / skew. */
   private jobQueue: WorkerJob[] = []
@@ -78,9 +82,14 @@ export class TiffDocument {
       const pending = this.pending.get(response.id)
       if (!pending) return
       this.pending.delete(response.id)
+      const wasThumbnail = pending.thumbnail === true
       if (response.type === 'error') pending.reject(new Error(response.message))
       else pending.resolve(response)
       this.workerBusy = false
+      // Queue the next thumbnail before pumpJobs, or a warning scan already waiting would start
+      // in the gap and every later thumbnail would wait on a full-page decode.
+      if (wasThumbnail) this.thumbnailInFlight = false
+      if (!this.thumbnailInFlight) this.pumpThumbnails()
       this.pumpJobs()
     })
     worker.addEventListener('error', (event) => {
@@ -138,6 +147,14 @@ export class TiffDocument {
     this.pageUrls.set(key, url)
     this.evictPageUrls(page)
     return url
+  }
+
+  /**
+   * The thumbnail nearest `page` is rendered next. The sidebar passes the page in the middle of the list
+   * so scrolling to a later page doesn't wait out every thumbnail already queued above it.
+   */
+  setThumbnailFocus(page: number) {
+    this.focusPage = page
   }
 
   /**
@@ -252,21 +269,36 @@ export class TiffDocument {
     this.evictThumbnails(page)
   }
 
-  private pumpThumbnails() {
-    if (this.thumbnailInFlight || this.disposed) return
-    let target: Thumbnail | undefined
-    let key: string | undefined
-    while ((key = this.thumbnailQueue.shift()) !== undefined) {
+  /** Drops finished entries and returns the queued thumbnail closest to `focusPage`. */
+  private takeClosestThumbnail(): string | undefined {
+    let bestKey: string | undefined
+    let bestDist = Infinity
+    const pending: string[] = []
+    for (const key of this.thumbnailQueue) {
       const candidate = this.thumbnails.get(key)
-      if (candidate && !candidate.settled) {
-        target = candidate
-        break
+      if (!candidate || candidate.settled) continue
+      pending.push(key)
+      const dist = Math.abs(candidate.page - this.focusPage)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestKey = key
       }
     }
-    if (!target) return
+    this.thumbnailQueue = bestKey === undefined ? [] : pending.filter((key) => key !== bestKey)
+    return bestKey
+  }
+
+  private pumpThumbnails() {
+    if (this.thumbnailInFlight || this.disposed) return
+    const key = this.takeClosestThumbnail()
+    if (!key) return
+    const target = this.thumbnails.get(key)
+    if (!target || target.settled) return
 
     const { page, ops } = target
     this.thumbnailInFlight = true
+    // The worker message handler queues the following thumbnail. Doing it here as well let a
+    // background job start in between, so a long document's later pages waited twice.
     this.send({ type: 'thumbnail', page, ops }, [], PRIORITY_THUMBNAIL)
       .then((response) => {
         if (response.type !== 'thumbnail') throw new Error('Unexpected response from TIFF decoder.')
@@ -277,10 +309,6 @@ export class TiffDocument {
         if (thumbnail.settled) return
         thumbnail.settled = true
         thumbnail.reject(err)
-      })
-      .finally(() => {
-        this.thumbnailInFlight = false
-        this.pumpThumbnails()
       })
   }
 
@@ -296,7 +324,7 @@ export class TiffDocument {
     if (this.disposed) return Promise.reject(new Error('Document was closed.'))
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      this.pending.set(id, { resolve, reject, thumbnail: request.type === 'thumbnail' })
       const seq = this.jobSeq++
       this.jobQueue.push({
         priority,
@@ -319,6 +347,7 @@ export class TiffDocument {
   private rejectAll(error: Error) {
     this.jobQueue = []
     this.workerBusy = false
+    this.thumbnailInFlight = false
     for (const pending of this.pending.values()) pending.reject(error)
     this.pending.clear()
   }

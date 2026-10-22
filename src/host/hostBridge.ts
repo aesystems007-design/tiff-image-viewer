@@ -8,6 +8,7 @@
  */
 
 import { marginSpecFromHost, type MarginSpec } from '../margins/margins'
+import { actionBrandFromHost, type ActionBrand } from './actionBrand'
 import { allowedPageSizeFromHost, type AllowedPageSizeRule } from './allowedPageSize'
 import { parseDpiRequirement } from './dpiRequirement'
 import type { AnnotationKind, UneditableAnnotation } from './uneditableAnnotation'
@@ -148,6 +149,15 @@ export type HostCommand =
    * `iconFont`, when present, is the Font Awesome stylesheet or kit script for `<i>` values (`null` removes it).
    */
   | { type: 'set-icons'; icons: Record<string, string | null>; iconFont: string | null | undefined }
+  /**
+   * Label and colors for the toolbar Apply and Cancel buttons. A missing button is left as it is.
+   * `null` restores that button. A field left out is left as it is; `null` or `''` restores that field.
+   */
+  | {
+      type: 'set-actions'
+      apply: Partial<ActionBrand> | null | undefined
+      cancel: Partial<ActionBrand> | null | undefined
+    }
   /**
    * The company's Dynamic Web TWAIN product key. Empty or null hides the scan button.
    * The key is not echoed back in any event.
@@ -293,6 +303,13 @@ function parseCommand(data: unknown): HostCommand | null {
     const id = message.annotationId
     const annotationId = typeof id === 'number' && Number.isInteger(id) ? id : null
     return { type: 'remove-uneditable-annotation', annotationId, requestId }
+  }
+
+  if (message.type === 'set-actions') {
+    const apply = 'apply' in message ? actionBrandFromHost(message.apply) : undefined
+    const cancel = 'cancel' in message ? actionBrandFromHost(message.cancel) : undefined
+    if (apply === undefined && cancel === undefined) return null
+    return { type: 'set-actions', apply, cancel }
   }
 
   if (message.type === 'set-icons' && message.icons && typeof message.icons === 'object') {

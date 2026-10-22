@@ -88,6 +88,7 @@ src/api/asTiff.ts                fileKind (TIFF / PDF by magic bytes) and asTiff
                                  anything else rejected. Every opened or inserted file goes through it
 src/api/pdfToTiff.ts             stand-in for the PDF -> TIFF conversion API: one labelled blank Letter page per PDF page
                                  (pages counted by regex), written with src/export
+src/host/actionBrand.ts          Apply / Cancel label and colors (set-actions, window.tiffViewerActions)
 src/host/hostBridge.ts           messages to / from the hosting app: notifyHost (events), listenToHost (commands),
                                  isHosted, initialDocumentId (?id= stand-alone only; ?docId= still accepted)
 src/host/legacyAnnotation.ts     the old viewer's annotation object (AddAnnotation) -> Annotation: validation, RichText,
@@ -211,6 +212,7 @@ src/tiff/
   - `image-cleared`: empty the viewer (generic empty state).
   - `save-acked`, `id` / `save-failed`, `id`, `message`: answer to `save-requested`. `id` must match the request.
   - `load-document`, `id`: **dev shortcut** — viewer fetches via stand-in `fetchDocument` (prefer `open-image`).
+  - `set-actions`, `apply?`, `cancel?`: label, tooltip (`title`), and colors (`background`, `color`) for the toolbar Apply and Cancel buttons. A missing button is left as it is. `null` restores that button. A field left out is left as it is; `null` or `''` restores that field. Colors are hex or `rgb()` / `rgba()`; anything else is ignored. Labels are plain text (40 characters). The same object is `window.tiffViewerActions` before the app script. Defaults stay Apply `#3d64b5` and Cancel `#6b7686`.
   - `set-icons`, `icons`, `iconFont?`: `{ [name]: string | null }`. Replaces built-in icons (same values as `window.tiffViewerIcons`: image URL, one `<svg>`, or one Font Awesome `<i>`). `null` restores one. `iconFont` is the Font Awesome stylesheet or kit script for `<i>` values (`null` removes it); omit it to leave the current font. Applied whenever the host sends it.
   - `set-scan-license`, `productKey`: the company's Dynamic Web TWAIN product key (same as `window.tiffViewerScanLicense`). A non-empty key shows the scan button; `null` or `''` hides it. Not echoed in events.
   - `add-annotation`, `annotation`, `dpi`, `requestId`: the host adds one annotation (`addHostAnnotation` in `App.vue`). `annotation.type` is `'Editable'` or `'Uneditable'`. Without `type`, `stampType: 'UneditableAnnotation'` (or `'FillInStamp'`) means Uneditable and any other object is Editable. A bad `type` is an `Error`. The host should wait for `document-loaded` first; with no document open (or while saving/loading) the answer is an `Error`. `requestId` (string or number, optional) is echoed in `annotation-result` and again in `annotations-burned`. Annotations are overlays until `burn-annotations`: they do not dirty the document and Apply does not draw them.
@@ -243,5 +245,5 @@ Rules to preserve:
 
 - Match existing style: 2-space indent, no semicolons, single quotes.
 - Components stay small and single-purpose; parents own state, children emit events.
-- Toolbar: white background, navy icons `#1f3a68` (bold `#27498c`), borders `#c9d1dd`, Apply `#3d64b5`, Cancel `#6b7686`.
+- Toolbar: white background, navy icons `#1f3a68` (bold `#27498c`), borders `#c9d1dd`, Apply `#3d64b5`, Cancel `#6b7686`. A company can replace the Apply and Cancel label and those two colors (`set-actions`).
 - Sidebar is white (user request): background `#fff`, text `#1d2635`, borders `#c9d1dd`, light panels (status bar, scrollbar track, empty thumbnail frame) `#f4f6f9`, accent `#2f6fd1` (selected thumbnail background `#e8eef8`). The main stage (`.osd-wrap`) is gray `#5a5a5a` and scrolls; the page sits in a sized `.canvas-container` (like the old viewer's canvas: CSS width/height = the displayed page, 1px black border) and the image is scaled to fill that box. Zoom grows/shrinks the container; Fit Width / Best Fit / Full Size set its size from the stage.

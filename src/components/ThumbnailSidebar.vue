@@ -184,9 +184,39 @@ function scrollToCurrent() {
   list.value?.querySelector(`[data-page="${props.page}"]`)?.scrollIntoView({ block: 'nearest' })
 }
 
+/** Page nearest the middle of the list; its thumbnail is rendered before ones scrolled off screen. */
+function focusVisibleThumbnail() {
+  const root = list.value
+  if (!root) return
+  const mid = root.getBoundingClientRect().top + root.clientHeight / 2
+  let best: number | undefined
+  let bestDist = Infinity
+  root.querySelectorAll<HTMLElement>('[data-page]').forEach((el) => {
+    const box = el.getBoundingClientRect()
+    if (box.height === 0) return
+    const dist = Math.abs(box.top + box.height / 2 - mid)
+    if (dist < bestDist) {
+      bestDist = dist
+      best = Number(el.dataset.page)
+    }
+  })
+  if (best === undefined || Number.isNaN(best)) return
+  props.doc.setThumbnailFocus(best)
+}
+
+let focusFrame = 0
+function scheduleThumbnailFocus() {
+  if (focusFrame) return
+  focusFrame = requestAnimationFrame(() => {
+    focusFrame = 0
+    focusVisibleThumbnail()
+  })
+}
+
 onMounted(() => {
   observer = new IntersectionObserver(
     (entries) => {
+      focusVisibleThumbnail()
       for (const entry of entries) {
         if (!entry.isIntersecting) continue
         observer?.unobserve(entry.target)
@@ -195,8 +225,12 @@ onMounted(() => {
     },
     { root: list.value, rootMargin: '300px 0px' },
   )
+  list.value?.addEventListener('scroll', scheduleThumbnailFocus, { passive: true })
   observeUnloaded()
-  nextTick(scrollToCurrent)
+  nextTick(() => {
+    focusVisibleThumbnail()
+    scrollToCurrent()
+  })
 })
 
 /** Starts lazy loading for listed thumbnails that were never requested (e.g. pages restored by Undo). */
@@ -218,9 +252,18 @@ watch(
 onBeforeUnmount(() => {
   observer?.disconnect()
   observer = null
+  list.value?.removeEventListener('scroll', scheduleThumbnailFocus)
+  if (focusFrame) cancelAnimationFrame(focusFrame)
 })
 
-watch(() => props.page, scrollToCurrent, { flush: 'post' })
+watch(
+  () => props.page,
+  (page) => {
+    props.doc.setThumbnailFocus(page)
+    scrollToCurrent()
+  },
+  { flush: 'post' },
+)
 </script>
 
 <template>
@@ -301,6 +344,9 @@ watch(() => props.page, scrollToCurrent, { flush: 'post' })
   flex-direction: column;
   width: 156px;
   flex-shrink: 0;
+  /* Shrink with the window so the list scrolls. Without this the list grows to every page and
+     they all count as visible, so a long document decodes every thumbnail up front. */
+  min-height: 0;
   background: #fff;
   border-right: 1px solid #c9d1dd;
   color-scheme: light;
@@ -387,6 +433,7 @@ watch(() => props.page, scrollToCurrent, { flush: 'post' })
 
 .thumbs {
   flex: 1;
+  min-height: 0;
   margin: 0;
   padding: 0.75rem;
   overflow-y: auto;

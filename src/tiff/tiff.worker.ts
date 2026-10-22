@@ -237,6 +237,14 @@ function rotateContent(source: OffscreenCanvas, degrees: number): OffscreenCanva
   return canvas
 }
 
+function resize(source: OffscreenCanvas, width: number, height: number): OffscreenCanvas {
+  const canvas = new OffscreenCanvas(width, height)
+  const ctx = context(canvas)
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(source, 0, 0, width, height)
+  return canvas
+}
+
 /** Longest edge the page is reduced to for skew detection; plenty for lines of text, and quick. */
 const SKEW_DETECTION_SIZE = 1600
 
@@ -349,7 +357,7 @@ function context(canvas: OffscreenCanvas): OffscreenCanvasRenderingContext2D {
   return ctx
 }
 
-function decodePage(pageIndex: number): OffscreenCanvas {
+function decodeRgba(pageIndex: number): { rgba: Uint8Array; width: number; height: number } {
   const page = pages[pageIndex]
   if (!page) throw new Error(`Page ${pageIndex + 1} does not exist.`)
   const { source, ifd } = page
@@ -358,7 +366,11 @@ function decodePage(pageIndex: number): OffscreenCanvas {
   const rgba = UTIF.toRGBA8(ifd)
   const { width, height } = ifd
   ifd.data = undefined
+  return { rgba, width, height }
+}
 
+function decodePage(pageIndex: number): OffscreenCanvas {
+  const { rgba, width, height } = decodeRgba(pageIndex)
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not create a 2D canvas context.')
@@ -367,28 +379,75 @@ function decodePage(pageIndex: number): OffscreenCanvas {
   return canvas
 }
 
-// Halve repeatedly before the final resize; a single large downscale aliases badly (especially text).
-function makeThumbnail(source: OffscreenCanvas): Promise<Blob> {
-  const scale = Math.min(1, THUMBNAIL_SIZE / Math.max(source.width, source.height))
-  const targetWidth = Math.max(1, Math.round(source.width * scale))
-  const targetHeight = Math.max(1, Math.round(source.height * scale))
-
-  let current = source
-  while (current.width / 2 >= targetWidth && current.height / 2 >= targetHeight) {
-    current = resize(current, Math.round(current.width / 2), Math.round(current.height / 2))
+/**
+ * Sidebar preview. Pages without edits are box-filtered straight from the decoded pixels, so a long
+ * document doesn't build a full-size canvas and high-quality-resample it for every page (that resample
+ * dominated thumbnail time past the first screenful). Edited pages still render fully, then take the
+ * same filter from the canvas.
+ */
+async function thumbnailBlob(pageIndex: number, ops: readonly PageOp[]): Promise<Blob> {
+  if (ops.length === 0 && !decoded.has(pageIndex)) {
+    const { rgba, width, height } = decodeRgba(pageIndex)
+    return downscaleRgba(rgba, width, height, THUMBNAIL_SIZE).convertToBlob({ type: 'image/png' })
   }
-  if (current.width !== targetWidth || current.height !== targetHeight) {
-    current = resize(current, targetWidth, targetHeight)
-  }
-  return current.convertToBlob({ type: 'image/png' })
+  return makeThumbnail(editedPage(pageIndex, ops))
 }
 
-function resize(source: OffscreenCanvas, width: number, height: number): OffscreenCanvas {
-  const canvas = new OffscreenCanvas(width, height)
+function makeThumbnail(source: OffscreenCanvas): Promise<Blob> {
+  const image = context(source).getImageData(0, 0, source.width, source.height)
+  return downscaleRgba(image.data, image.width, image.height, THUMBNAIL_SIZE).convertToBlob({ type: 'image/png' })
+}
+
+/** Averages source pixels into each thumbnail pixel so thin text survives the shrink. */
+function downscaleRgba(
+  rgba: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  maxEdge: number,
+): OffscreenCanvas {
+  const scale = Math.min(1, maxEdge / Math.max(width, height))
+  const tw = Math.max(1, Math.round(width * scale))
+  const th = Math.max(1, Math.round(height * scale))
+  const canvas = new OffscreenCanvas(tw, th)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not create a 2D canvas context.')
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(source, 0, 0, width, height)
+  if (tw === width && th === height) {
+    const pixels = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, width * height * 4)
+    ctx.putImageData(new ImageData(pixels, width, height), 0, 0)
+    return canvas
+  }
+
+  const acc = new Uint32Array(tw * th * 4)
+  const count = new Uint32Array(tw * th)
+  const xBin = new Uint16Array(width)
+  for (let x = 0; x < width; x++) xBin[x] = Math.min(tw - 1, ((x * tw) / width) | 0)
+
+  for (let y = 0; y < height; y++) {
+    const dy = Math.min(th - 1, ((y * th) / height) | 0)
+    const src = y * width * 4
+    const dstRow = dy * tw
+    for (let x = 0; x < width; x++) {
+      const dx = xBin[x]
+      const di = (dstRow + dx) * 4
+      const si = src + x * 4
+      acc[di] += rgba[si]
+      acc[di + 1] += rgba[si + 1]
+      acc[di + 2] += rgba[si + 2]
+      acc[di + 3] += rgba[si + 3]
+      count[dstRow + dx]++
+    }
+  }
+
+  const out = new Uint8ClampedArray(tw * th * 4)
+  for (let i = 0; i < count.length; i++) {
+    const n = count[i] || 1
+    const o = i * 4
+    out[o] = acc[o] / n
+    out[o + 1] = acc[o + 1] / n
+    out[o + 2] = acc[o + 2] / n
+    out[o + 3] = acc[o + 3] / n
+  }
+  ctx.putImageData(new ImageData(out, tw, th), 0, 0)
   return canvas
 }
 
@@ -416,7 +475,7 @@ self.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
           id: request.id,
           type: 'thumbnail',
           page: request.page,
-          blob: await makeThumbnail(editedPage(request.page, request.ops)),
+          blob: await thumbnailBlob(request.page, request.ops),
         })
         break
       case 'export':

@@ -612,6 +612,21 @@ An uneditable entry also includes `annotation` and `pageSize`. `annotation` is t
 
 With nothing to burn, or with no document open, the status is `Error` and `annotations` is `[]`.
 
+## Apply and Cancel
+
+A company can rename the toolbar Apply and Cancel buttons and set their colors. A field left out stays as it is. `null` or `""` on a field restores that default. `null` for the whole button restores all of its defaults. Colors are `#rgb`, `#rrggbb`, `#rrggbbaa`, or `rgb()` / `rgba()`. Anything else is ignored. Labels are plain text, up to 40 characters.
+
+```json
+{
+  "target": "tiff-image-viewer",
+  "type": "set-actions",
+  "apply": { "label": "Save", "title": "Save the image", "background": "#0a7a3e", "color": "#ffffff" },
+  "cancel": { "label": "Discard", "background": "#8a1c1c", "color": "#ffffff" }
+}
+```
+
+The same object can be set as `window.tiffViewerActions` before the viewer script runs. The built-in labels are Apply and Cancel. The built-in colors are `#3d64b5` and `#6b7686`.
+
 ## Icons
 
 Built-in toolbar icons can be replaced by name. A value is an image URL (`https:`, a site path, or `data:image/…`), one `<svg>` element, or one Font Awesome `<i>` tag. `null` or `""` restores the built-in icon. Unknown names are ignored. SVG and `<i>` overrides are sanitized: scripts, event handlers, and anything other than the icon element are dropped. An `<i>` keeps its `class` only.
@@ -683,6 +698,7 @@ Open http://localhost:5173/examples/host.html. The left side loads a TIFF from `
 | `set-margins` | `margins` | Margin rules for the open document. `null` clears the guides. |
 | `set-allowed-page-size` | `allowedPageSize`, `threshold` | `LETTER`, `LEGAL`, `LETTERLEGAL`, or `ANY`, and the inch tolerance. |
 | `set-dpi-requirement` | `dpiRequirement` | Company DPI requirement. Missing or non-positive restores 300. |
+| `set-actions` | `apply?`, `cancel?` | Label, tooltip, and colors for Apply and Cancel. `null` restores a button. |
 | `set-icons` | `icons`, `iconFont?` | Image URL, `<svg>`, Font Awesome `<i>`, or null, by icon name. `iconFont` is the Font Awesome CSS or kit script. |
 | `set-scan-license` | `productKey` | Dynamic Web TWAIN key. `null` hides Scan. |
 | `add-annotation` | `annotation`, `dpi?`, `requestId?` | Add one editable or uneditable overlay. |
