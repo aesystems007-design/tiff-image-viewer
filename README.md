@@ -424,7 +424,10 @@ An editable annotation can be moved, resized, edited, and deleted in the viewer.
     "FontUnderLine": "False",
     "Align": "LEFT",
     "Border": "True",
-    "AnnotationType": "VerbiageStamp"
+    "AnnotationType": "VerbiageStamp",
+    "placeBackground": "#fff3a1",
+    "burnBackground": "transparent",
+    "image": "data:image/png;base64,..."
   }
 }
 ```
@@ -432,13 +435,17 @@ An editable annotation can be moved, resized, edited, and deleted in the viewer.
 | Field | Meaning |
 | --- | --- |
 | `type` | `"Editable"`. Omitted, the object is editable unless `stampType` says otherwise. |
-| `Text` | Required, non-empty. `\n` starts a new line. |
+| `Text` | The words. `\n` starts a new line. Can be omitted when `html` or `image` is set. |
 | `XPos`, `YPos`, `Width`, `Height` | Pixels at `dpi` on the page as displayed. Width and height must be positive. The box is clamped to the page. Height is a minimum and grows down to fit the text. |
 | `PageIndex` | Display position, 0-based. Omit it or send `null` to use the page on screen. |
 | `FontSize` | Pixels at `dpi`. Converted to points as `FontSize × 72 / dpi`. 48 at 300 dpi is 11.52 pt. |
 | `FontBold`, `FontUnderLine` | `"True"` / `"False"` or a boolean. |
 | `Align` | `"LEFT"`, `"CENTER"`, or `"RIGHT"`. |
 | `Border` | `"True"` draws a 0.72 pt black frame at 75% opacity when the annotation is burned in. |
+| `placeBackground` | Fill shown while the box is on the page. A color, or `"transparent"` / `null` for none. Omitted draws no fill. |
+| `burnBackground` | Fill drawn into the page on burn. A color, or `"transparent"` / `null` for none. Omitted draws no fill. Independent of `placeBackground`. |
+| `image` | A picture inserted inline at the end of the text, in the flow with the words. A `data:image/…` URL or an `http(s)` address (`Image` is accepted too). The annotation editor's picture button inserts one the same way, at the caret. |
+| `html` | HTML drawn instead of the rich text (`Html` is accepted too). `<style>` and `<img>` render. Scripts, event handlers, and frames are dropped. `Text` can be omitted when `html` or `image` is set. |
 | `AnnotationType` | Name. Default `VerbiageStamp`. |
 | `Name`, `FontName`, `AnnotationFilename` | Ignored. Text is drawn in Arial. |
 
@@ -471,6 +478,8 @@ An uneditable annotation can be dragged and nothing else. Each command adds one.
     "textAlign": "LEFT",
     "alignItem": "top",
     "opacity": 100,
+    "placeBackground": "#fff3a1",
+    "burnBackground": "transparent",
     "isFill": true,
     "fillColor": "#fff3a1",
     "isStroke": true,
@@ -483,7 +492,9 @@ An uneditable annotation can be dragged and nothing else. Each command adds one.
 
 `type: "Uneditable"` is the current marker. Without `type`, `stampType: "UneditableAnnotation"` or the older `"FillInStamp"` means the same thing. Any other `type` is an error.
 
-`left`, `top`, `width`, and `height` are required pixels at `dpi` on the page as displayed. `width` and `height` must be positive. `pageIndex` is the display position (0-based) and defaults to the first page. `text` is the label (`Text` is accepted too). `opacity` is 0–100. `alignItem` is `top`, `middle`, `center`, or `bottom`. `textAlign` is `LEFT`, `CENTER`, or `RIGHT`. `dashType` is `solid`, `dash` / `dashed`, or `dot` / `dotted`. `isFill` paints `fillColor` (default `#ffff00`). `isStroke` draws `strokeColor` (default black) at `strokeWidth`.
+`left`, `top`, `width`, and `height` are required pixels at `dpi` on the page as displayed. `width` and `height` must be positive. `pageIndex` is the display position (0-based) and defaults to the first page. `text` is the label (`Text` is accepted too). `opacity` is 0–100. `alignItem` is `top`, `middle`, `center`, or `bottom`. `textAlign` is `LEFT`, `CENTER`, or `RIGHT`. `dashType` is `solid`, `dash` / `dashed`, or `dot` / `dotted`. `placeBackground` is the fill the user sees while placing the box. `burnBackground` is the fill drawn into the page, and it can be a different color or `"transparent"`. A color is `#rgb`, `#rrggbb`, `#rrggbbaa`, or `rgb()` / `rgba()`. `null`, `""`, `"transparent"`, or `"none"` draws no fill. Leave a field out and that side uses `fillColor` when `isFill` (default `#ffff00`), or no fill when `isFill` is not set. An invalid color is ignored. `isStroke` draws `strokeColor` (default black) at `strokeWidth`.
+
+`image` is a picture inserted inline at the end of the text (a data URL or an `http(s)` address), so it sits in the line with the words. `html` is drawn instead of `text`: a fragment with CSS and `<img>` tags. Its `<style>` stays inside the box. Scripts, event handlers, and frames are removed. When `html` is set, `text` and `image` are not drawn. An `http(s)` image has to be readable by the viewer page or it is skipped when the annotation is burned in. A data URL always burns in.
 
 ### The add result
 
@@ -583,13 +594,24 @@ Result:
       "annotationId": 1,
       "type": "Editable",
       "requestId": "ann-1",
-      "pageIndex": 0
+      "pageIndex": 0,
+      "x": 150,
+      "y": 200,
+      "width": 900,
+      "height": 160,
+      "dpi": 300,
+      "pageSize": { "width": 2550, "height": 3300 }
     },
     {
       "annotationId": 3,
       "type": "Uneditable",
       "requestId": 7,
       "pageIndex": 0,
+      "x": 200,
+      "y": 510,
+      "width": 780,
+      "height": 160,
+      "dpi": 300,
       "annotation": {
         "type": "Uneditable",
         "stampType": "UneditableAnnotation",
@@ -606,9 +628,11 @@ Result:
 }
 ```
 
-Each entry's `requestId` is the id from the `add-annotation` that created it. `pageIndex` is the display position of the page it was drawn on.
+Each entry's `requestId` is the id from the `add-annotation` that created it. `pageIndex` is the display position of the page it was drawn on. `annotationId` is the id from `annotation-result`.
 
-An uneditable entry also includes `annotation` and `pageSize`. `annotation` is the object as sent, with `left`, `top`, and `pageIndex` of where it was drawn. `left` and `top` are DPI-requirement pixels on the page as displayed. An annotation the user did not move keeps the `left` and `top` that were sent. `pageSize` is that page's size in the same pixels.
+`x`, `y`, `width`, and `height` are where that box was drawn, in the page's own pixels, as displayed. `dpi` is that page's resolution, so it matches the image. The page in the example above is 300 dpi, which is why those pixels match the positions that were sent. A 200 dpi scan reports `dpi` 200, and the box in that image's pixels, even when it was placed at a 300 dpi requirement. `pageSize` is the page in those same pixels. A box the user moved or resized comes back where it was drawn.
+
+An uneditable entry also includes `annotation`. That is the object as sent, with `left`, `top`, `width`, `height`, and `pageIndex` of where it was drawn. Those four numbers match `x`, `y`, `width`, and `height`.
 
 With nothing to burn, or with no document open, the status is `Error` and `annotations` is `[]`.
 
@@ -649,6 +673,31 @@ Built-in toolbar icons can be replaced by name. A value is an image URL (`https:
 The same map can be set as `window.tiffViewerIcons` before the viewer script runs, and the font URL as `window.tiffViewerIconFont`.
 
 Names: `sidebar`, `undo`, `print`, `download`, `insert`, `stamp`, `scan`, `trash`, `rotate-left`, `rotate-right`, `move-down`, `move-up`, `select-area`, `brightness`, `contrast`, `despeckle`, `scale-up`, `scale-down`, `spinner`, `caret-left`, `caret-right`, `zoom-in`, `zoom-out`, `fit-page`, `fit-width`, `fit-actual`, `letter`, `legal`, `white-out`, `eraser`, `reposition`, `deskew`, `warning`, `chevron-down`, `checkbox`, `checkbox-on`, `bold`, `italic`, `underline`, `font`, `align-left`, `align-center`, `align-right`, `edit`, `close`.
+
+## Toolbar buttons
+
+A company can hide toolbar buttons by name. This is separate from icons: a thin button and the large "all pages" button share an icon, and each has its own name. `false` hides a button. `true`, `null`, or `""` shows it again. A name left out stays as it is. Unknown names are ignored. Every button starts visible.
+
+```json
+{
+  "target": "tiff-image-viewer",
+  "type": "set-buttons",
+  "buttons": {
+    "print": false,
+    "rotate-left-all": false,
+    "rotate-right-all": false,
+    "download": true
+  }
+}
+```
+
+The same map can be set as `window.tiffViewerButtons` before the viewer script runs.
+
+Names: `sidebar`, `undo`, `print`, `download`, `insert`, `scan`, `delete`, `rotate-left`, `rotate-right`, `rotate-left-all`, `rotate-right-all`, `move-down`, `move-up`, `select-area`, `brightness`, `despeckle`, `despeckle-all`, `scale-up`, `scale-up-all`, `scale-down`, `scale-down-all`, `apply`, `cancel`, `letter`, `letter-all`, `legal`, `legal-all`, `page-nav`, `zoom`, `fit-page`, `fit-width`, `fit-actual`, `fullscreen`, `white-out`, `white-out-all`, `erase`, `reposition`, `deskew`, `deskew-all`.
+
+`delete` is the trash-can button. `brightness` is the brightness and contrast button. `page-nav` is the previous page, page number, and next page together. `zoom` is the zoom percentage and the zoom in and zoom out buttons. A name ending in `-all` is the large button that acts on every page. The thin button with the same icon acts on the selected pages.
+
+Scan stays hidden until a product key is set, even when `scan` is `true`. Hiding `undo` also turns off Ctrl+Z. Hiding `page-nav` also turns off Page Up and Page Down. Scrolling the page and Ctrl+wheel zoom are unchanged.
 
 ## Scanning
 
@@ -700,6 +749,7 @@ Open http://localhost:5173/examples/host.html. The left side loads a TIFF from `
 | `set-dpi-requirement` | `dpiRequirement` | Company DPI requirement. Missing or non-positive restores 300. |
 | `set-actions` | `apply?`, `cancel?` | Label, tooltip, and colors for Apply and Cancel. `null` restores a button. |
 | `set-icons` | `icons`, `iconFont?` | Image URL, `<svg>`, Font Awesome `<i>`, or null, by icon name. `iconFont` is the Font Awesome CSS or kit script. |
+| `set-buttons` | `buttons` | `false` hides a toolbar button. `true`, `null`, or `""` shows it. A name left out stays as it is. |
 | `set-scan-license` | `productKey` | Dynamic Web TWAIN key. `null` hides Scan. |
 | `add-annotation` | `annotation`, `dpi?`, `requestId?` | Add one editable or uneditable overlay. |
 | `remove-uneditable-annotation` | `annotationId`, `requestId?` | Remove one uneditable overlay. |

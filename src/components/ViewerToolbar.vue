@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { actionBrands } from '../host/actionBrand'
+import { toolbarButtonShown, type ToolbarButton } from '../host/toolbarButtons'
 import { SCALE_STEP, type PaperSize } from '../tiff/pageOps'
 import type { FitMode } from '../viewer/fitMode'
 import AppIcon from './AppIcon.vue'
@@ -138,12 +139,43 @@ function brandStyle(name: 'apply' | 'cancel') {
   return style
 }
 
-const conversions = computed(() => [
-  { size: 'letter' as const, all: false, icon: 'letter' as const, title: `Convert ${selectionLabel.value} to Letter (8.5" × 11")` },
-  { size: 'letter' as const, all: true, icon: 'letter' as const, title: 'Convert all pages to Letter (8.5" × 11")' },
-  { size: 'legal' as const, all: false, icon: 'legal' as const, title: `Convert ${selectionLabel.value} to Legal (8.5" × 14")` },
-  { size: 'legal' as const, all: true, icon: 'legal' as const, title: 'Convert all pages to Legal (8.5" × 14")' },
-])
+const FILE_BUTTONS = ['undo', 'print', 'download', 'insert', 'scan', 'delete'] as const satisfies readonly ToolbarButton[]
+const ROTATE_BUTTONS = ['rotate-left', 'rotate-right', 'rotate-left-all', 'rotate-right-all'] as const satisfies readonly ToolbarButton[]
+const EDIT_BUTTONS = [
+  'move-down',
+  'move-up',
+  'select-area',
+  'brightness',
+  'despeckle',
+  'despeckle-all',
+  'scale-up',
+  'scale-up-all',
+  'scale-down',
+  'scale-down-all',
+] as const satisfies readonly ToolbarButton[]
+const ACTION_BUTTONS = ['apply', 'cancel'] as const satisfies readonly ToolbarButton[]
+const PAPER_BUTTONS = ['letter', 'letter-all', 'legal', 'legal-all'] as const satisfies readonly ToolbarButton[]
+const VIEW_BUTTONS = ['page-nav', 'zoom', 'fit-page', 'fit-width', 'fit-actual', 'fullscreen'] as const satisfies readonly ToolbarButton[]
+const MARKUP_BUTTONS = ['white-out', 'white-out-all', 'erase', 'reposition', 'deskew', 'deskew-all'] as const satisfies readonly ToolbarButton[]
+
+/** A company can hide a button. Scan stays hidden until a product key is set, even when this says to show it. */
+function shown(name: ToolbarButton): boolean {
+  if (name === 'scan' && !props.canScan) return false
+  return toolbarButtonShown(name)
+}
+
+function anyShown(names: readonly ToolbarButton[]): boolean {
+  return names.some((name) => shown(name))
+}
+
+const conversions = computed(() =>
+  [
+    { id: 'letter' as const, size: 'letter' as const, all: false, icon: 'letter' as const, title: `Convert ${selectionLabel.value} to Letter (8.5" × 11")` },
+    { id: 'letter-all' as const, size: 'letter' as const, all: true, icon: 'letter' as const, title: 'Convert all pages to Letter (8.5" × 11")' },
+    { id: 'legal' as const, size: 'legal' as const, all: false, icon: 'legal' as const, title: `Convert ${selectionLabel.value} to Legal (8.5" × 14")` },
+    { id: 'legal-all' as const, size: 'legal' as const, all: true, icon: 'legal' as const, title: 'Convert all pages to Legal (8.5" × 14")' },
+  ].filter((item) => shown(item.id)),
+)
 
 const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; title: string }[] = [
   { mode: 'page', icon: 'fit-page', title: 'Best Fit' },
@@ -156,77 +188,86 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
   <header class="toolbar">
     <div class="row">
       <ToolButton
+        v-if="shown('sidebar')"
         icon="sidebar"
         title="Show/hide thumbnails"
         :active="thumbnailsVisible"
         :disabled="!hasDoc"
         @click="emit('toggle-thumbnails')"
       />
-      <span class="divider" />
+      <span v-if="shown('sidebar') && anyShown([...FILE_BUTTONS, ...ROTATE_BUTTONS, ...EDIT_BUTTONS])" class="divider" />
 
-      <ToolButton icon="undo" title="Undo (Ctrl+Z)" :disabled="!canUndo" @click="emit('undo')" />
-      <ToolButton icon="print" title="Print" :disabled="!canEdit || busy" @click="emit('print')" />
+      <ToolButton v-if="shown('undo')" icon="undo" title="Undo (Ctrl+Z)" :disabled="!canUndo" @click="emit('undo')" />
+      <ToolButton v-if="shown('print')" icon="print" title="Print" :disabled="!canEdit || busy" @click="emit('print')" />
       <ToolButton
+        v-if="shown('download')"
         icon="download"
         title="Download to PC (PDF or TIFF)"
         :disabled="!canEdit || downloading"
         @click="emit('download')"
       />
       <ToolButton
+        v-if="shown('insert')"
         icon="insert"
         :title="`Insert pages from a TIFF or PDF file above the selected ${selectedCount > 1 ? 'pages' : 'page'}`"
         :disabled="!canEdit"
         @click="insertInput?.click()"
       />
-      <input ref="insertInput" type="file" :accept="DOCUMENT_TYPES" hidden @change="onInsertChosen" />
+      <input v-if="shown('insert')" ref="insertInput" type="file" :accept="DOCUMENT_TYPES" hidden @change="onInsertChosen" />
       <ToolButton
-        v-if="canScan"
+        v-if="shown('scan')"
         icon="scan"
         :title="`Scan pages above the selected ${selectedCount > 1 ? 'pages' : 'page'}`"
         :disabled="!canEdit || scanning"
         @click="emit('scan')"
       />
       <ToolButton
+        v-if="shown('delete')"
         icon="trash"
         :title="!hasDoc || canDeletePages ? `Delete ${selectionLabel} (Undo restores)` : 'Cannot delete every page'"
         :disabled="!canEdit || !canDeletePages"
         @click="emit('delete-pages')"
       />
-      <span class="divider" />
+      <span v-if="anyShown(FILE_BUTTONS) && anyShown([...ROTATE_BUTTONS, ...EDIT_BUTTONS])" class="divider" />
 
-      <ToolButton icon="rotate-left" :title="`Rotate ${selectionLabel} left`" :disabled="!canEdit" @click="emit('rotate-page', -90)" />
-      <ToolButton icon="rotate-right" :title="`Rotate ${selectionLabel} right`" :disabled="!canEdit" @click="emit('rotate-page', 90)" />
-      <ToolButton icon="rotate-left" title="Rotate all pages left" large :disabled="!canEdit" @click="emit('rotate-all', -90)" />
-      <ToolButton icon="rotate-right" title="Rotate all pages right" large :disabled="!canEdit" @click="emit('rotate-all', 90)" />
-      <span class="divider" />
+      <ToolButton v-if="shown('rotate-left')" icon="rotate-left" :title="`Rotate ${selectionLabel} left`" :disabled="!canEdit" @click="emit('rotate-page', -90)" />
+      <ToolButton v-if="shown('rotate-right')" icon="rotate-right" :title="`Rotate ${selectionLabel} right`" :disabled="!canEdit" @click="emit('rotate-page', 90)" />
+      <ToolButton v-if="shown('rotate-left-all')" icon="rotate-left" title="Rotate all pages left" large :disabled="!canEdit" @click="emit('rotate-all', -90)" />
+      <ToolButton v-if="shown('rotate-right-all')" icon="rotate-right" title="Rotate all pages right" large :disabled="!canEdit" @click="emit('rotate-all', 90)" />
+      <span v-if="anyShown(ROTATE_BUTTONS) && anyShown(EDIT_BUTTONS)" class="divider" />
 
       <ToolButton
+        v-if="shown('move-down')"
         icon="move-down"
         :title="`Move ${selectionLabel} down`"
         :disabled="!canMoveDown"
         @click="emit('move-pages', 1)"
       />
       <ToolButton
+        v-if="shown('move-up')"
         icon="move-up"
         :title="`Move ${selectionLabel} up`"
         :disabled="!canMoveUp"
         @click="emit('move-pages', -1)"
       />
       <ToolButton
+        v-if="shown('select-area')"
         icon="select-area"
         title="Select area: drag on the page (Esc to clear)"
         :active="selectAreaActive"
         :disabled="!canEdit"
         @click="emit('toggle-select-area')"
       />
-      <ImageAdjustments v-model:brightness="brightness" v-model:contrast="contrast" :disabled="!hasDoc" />
+      <ImageAdjustments v-if="shown('brightness')" v-model:brightness="brightness" v-model:contrast="contrast" :disabled="!hasDoc" />
       <ToolButton
+        v-if="shown('despeckle')"
         icon="despeckle"
         :title="`Despeckle ${selectionLabel} (each click removes bigger specks)`"
         :disabled="!canEdit"
         @click="emit('despeckle-pages', false)"
       />
       <ToolButton
+        v-if="shown('despeckle-all')"
         icon="despeckle"
         title="Despeckle all pages (each click removes bigger specks)"
         large
@@ -234,12 +275,14 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         @click="emit('despeckle-pages', true)"
       />
       <ToolButton
+        v-if="shown('scale-up')"
         icon="scale-up"
         :title="`Increase size of ${selectionLabel} (scale up 5%)`"
         :disabled="!canEdit"
         @click="emit('scale-pages', SCALE_STEP, false)"
       />
       <ToolButton
+        v-if="shown('scale-up-all')"
         icon="scale-up"
         title="Increase size of all pages (scale up 5%)"
         large
@@ -247,12 +290,14 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         @click="emit('scale-pages', SCALE_STEP, true)"
       />
       <ToolButton
+        v-if="shown('scale-down')"
         icon="scale-down"
         :title="`Decrease size of ${selectionLabel} (scale down 5%)`"
         :disabled="!canEdit"
         @click="emit('scale-pages', -SCALE_STEP, false)"
       />
       <ToolButton
+        v-if="shown('scale-down-all')"
         icon="scale-down"
         title="Decrease size of all pages (scale down 5%)"
         large
@@ -265,6 +310,7 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
 
     <div class="row">
       <button
+        v-if="shown('apply')"
         type="button"
         class="text-button apply"
         :style="brandStyle('apply')"
@@ -275,6 +321,7 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         {{ actionBrands.apply.label ?? 'Apply' }}
       </button>
       <button
+        v-if="shown('cancel')"
         type="button"
         class="text-button cancel"
         :style="brandStyle('cancel')"
@@ -284,20 +331,20 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
       >
         {{ actionBrands.cancel.label ?? 'Cancel' }}
       </button>
-      <span class="divider" />
+      <span v-if="anyShown(ACTION_BUTTONS) && anyShown([...PAPER_BUTTONS, ...VIEW_BUTTONS, ...MARKUP_BUTTONS])" class="divider" />
 
       <ToolButton
         v-for="conversion in conversions"
-        :key="`${conversion.size}-${conversion.all}`"
+        :key="conversion.id"
         :icon="conversion.icon"
         :title="conversion.title"
         :large="conversion.all"
         :disabled="!canEdit"
         @click="emit('convert-pages', conversion.size, conversion.all)"
       />
-      <span class="divider" />
+      <span v-if="anyShown(PAPER_BUTTONS) && anyShown([...VIEW_BUTTONS, ...MARKUP_BUTTONS])" class="divider" />
 
-      <div class="page-nav">
+      <div v-if="shown('page-nav')" class="page-nav">
         <button
           type="button"
           class="caret"
@@ -331,7 +378,7 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         </button>
       </div>
 
-      <div class="box zoom-box" :class="{ disabled: !hasDoc }">
+      <div v-if="shown('zoom')" class="box zoom-box" :class="{ disabled: !hasDoc }">
         <input
           v-model="zoomInput"
           class="zoom-input"
@@ -347,31 +394,35 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         <ToolButton icon="zoom-in" title="Zoom in (or Ctrl + scroll wheel)" :disabled="!hasDoc" @click="emit('zoom-in')" />
         <ToolButton icon="zoom-out" title="Zoom out (or Ctrl + scroll wheel)" :disabled="!hasDoc" @click="emit('zoom-out')" />
       </div>
+      <template v-for="fit in fitModes" :key="fit.mode">
+        <ToolButton
+          v-if="shown(fit.icon)"
+          :icon="fit.icon"
+          :title="fit.title"
+          :active="hasDoc && fitMode === fit.mode"
+          :disabled="!hasDoc"
+          @click="emit('fit', fit.mode)"
+        />
+      </template>
       <ToolButton
-        v-for="fit in fitModes"
-        :key="fit.mode"
-        :icon="fit.icon"
-        :title="fit.title"
-        :active="hasDoc && fitMode === fit.mode"
-        :disabled="!hasDoc"
-        @click="emit('fit', fit.mode)"
-      />
-      <ToolButton
+        v-if="shown('fullscreen')"
         :icon="fullscreen ? 'fullscreen-exit' : 'fullscreen'"
         :title="fullscreen ? 'Exit full screen (Esc)' : 'Full screen'"
         :active="fullscreen"
         :disabled="!hasDoc && !fullscreen"
         @click="emit('toggle-fullscreen')"
       />
-      <span class="divider" />
+      <span v-if="anyShown(VIEW_BUTTONS) && anyShown(MARKUP_BUTTONS)" class="divider" />
 
       <ToolButton
+        v-if="shown('white-out')"
         icon="white-out"
         :title="hasMargins || !hasDoc ? `White out margins and other areas on ${selectionLabel}` : 'White out margins (no margins for this document)'"
         :disabled="!canEdit || !hasMargins"
         @click="emit('white-out-margins', false)"
       />
       <ToolButton
+        v-if="shown('white-out-all')"
         icon="white-out"
         :title="hasMargins || !hasDoc ? 'White out margins and other areas on all pages' : 'White out margins on all pages (no margins for this document)'"
         large
@@ -379,6 +430,7 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         @click="emit('white-out-margins', true)"
       />
       <ToolButton
+        v-if="shown('erase')"
         icon="eraser"
         title="Erase: drag a rectangle on the page to erase it (Esc to stop)"
         :active="eraseActive"
@@ -386,6 +438,7 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         @click="emit('toggle-erase')"
       />
       <ToolButton
+        v-if="shown('reposition')"
         icon="reposition"
         title="Reposition: drag the page content to move it, or use the arrow keys (Esc to stop)"
         :active="repositionActive"
@@ -393,6 +446,7 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         @click="emit('toggle-reposition')"
       />
       <ToolButton
+        v-if="shown('deskew')"
         icon="deskew"
         tilt
         :title="`Deskew ${selectionLabel}`"
@@ -400,6 +454,7 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
         @click="emit('deskew-pages', false)"
       />
       <ToolButton
+        v-if="shown('deskew-all')"
         icon="deskew"
         tilt
         title="Deskew all pages"

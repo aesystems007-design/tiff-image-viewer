@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, triggerRef, watch } from 'vue'
 import { annotationOp, type Annotation } from './annotations/annotation'
-import type { RichText } from './annotations/richText'
+import { embedRichTextImages, rasterizeAnnotationBox } from './annotations/rasterize'
+import { isImageRun, loadInlineImage, textWithInlineImage, type ImageRun, type RichText } from './annotations/richText'
 import { asTiff } from './api/asTiff'
 import { fetchDocument, saveDocument } from './api/documentApi'
 import AnnotationEditor from './components/AnnotationEditor.vue'
@@ -17,7 +18,7 @@ import { movePagesWithin, usePageEdits } from './composables/usePageEdits'
 import { usePageSelection } from './composables/usePageSelection'
 import { setActionBrands } from './host/actionBrand'
 import { ANY_PAGE_SIZE, pageMatchesAllowedSize, pageSizeWarningDetail, type AllowedPageSizeRule } from './host/allowedPageSize'
-import { dpiRequirement, pageRectToRequirement, requirementRectToPage, setDpiRequirement } from './host/dpiRequirement'
+import { dpiRequirement, requirementRectToPage, setDpiRequirement } from './host/dpiRequirement'
 import {
   annotationKind,
   placedUneditableAnnotation,
@@ -29,9 +30,13 @@ import {
 } from './host/uneditableAnnotation'
 import { initialDocumentId, isHosted, listenToHost, notifyHost, type BurnedAnnotation, type HostCommand } from './host/hostBridge'
 import { setIconFont, setIcons } from './icons/registry'
+import { setToolbarButtons, toolbarButtonShown } from './host/toolbarButtons'
 import { canScan, setScanLicense } from './scan/license'
 import {
+  legacyAnnotationBackgrounds,
   legacyAnnotationBorder,
+  legacyAnnotationHtml,
+  legacyAnnotationImage,
   legacyAnnotationName,
   legacyAnnotationPageIndex,
   legacyAnnotationProblem,
@@ -54,11 +59,11 @@ import {
   type PageOp,
   type PaperSize,
 } from './tiff/pageOps'
-import type { ExportFormat, ExportPage } from './tiff/protocol'
+import type { ExportFormat, ExportPage, PageInfo } from './tiff/protocol'
 import { TiffDocument } from './tiff/TiffDocument'
 import { DEFAULT_FIT_MODE, type FitMode } from './viewer/fitMode'
 import { describeMove, screenInchesToShift, shiftToScreenInches, totalShift, type PageShift } from './viewer/contentShift'
-import type { ImageRect } from './viewer/imageRect'
+import { rotateRect, type ImageRect } from './viewer/imageRect'
 import type { PageGuide } from './viewer/pageGuide'
 import { warningDetail, type ImageWarning } from './warnings/imageWarning'
 
@@ -302,7 +307,7 @@ watch(annotations, (list) => {
 
 function openAnnotationEditor(id: number) {
   const annotation = annotations.value.find((a) => a.id === id)
-  if (!annotation) return
+  if (!annotation || annotation.html) return
   annotationEditor.value = { id, text: annotation.text }
   activeAnnotation.value = id
 }
@@ -326,7 +331,7 @@ function removeAnnotation(id: number) {
  * The host's add-annotation: an Editable annotation replaces the one with the same name (the VerbiageStamp);
  * an Uneditable one is added. Shows its page and answers with an `annotation-result` event.
  */
-function addHostAnnotation(command: Extract<HostCommand, { type: 'add-annotation' }>) {
+async function addHostAnnotation(command: Extract<HostCommand, { type: 'add-annotation' }>) {
   const reply = (status: 'Success' | 'Error', message: string, annotationId?: number) =>
     notifyHost({ type: 'annotation-result', requestId: command.requestId, status, message, annotationId })
   if (!doc.value || saving.value || hostLoading.value) {
@@ -347,14 +352,23 @@ function addHostAnnotation(command: Extract<HostCommand, { type: 'add-annotation
   }
   const dpi = command.dpi ?? documentDpi.value ?? dpiRequirement()
   const name = legacyAnnotationName(annotation)
+  const html = legacyAnnotationHtml(annotation)
+  let text = legacyAnnotationText(annotation, dpi)
+  const image = legacyAnnotationImage(annotation)
+  if (!html && image) {
+    const run = await loadInlineImage(image)
+    if (run) text = textWithInlineImage(text, run)
+  }
   const id = nextAnnotationId++
   const added: Annotation = {
     id,
     page: index,
     rect: legacyAnnotationRect(annotation, pageInfos.value[index], edits.rotations.value[index] ?? 0, dpi),
-    text: legacyAnnotationText(annotation, dpi),
+    text,
+    html,
     name,
     border: legacyAnnotationBorder(annotation),
+    ...legacyAnnotationBackgrounds(annotation),
     requestId: command.requestId,
   }
   annotations.value = [...annotations.value.filter((item) => item.name !== name), added]
@@ -369,6 +383,8 @@ interface PlacedUneditableAnnotation {
   rect: ImageRect
   moved: boolean
   annotation: UneditableAnnotation
+  /** Picture inline with the label. Null when the annotation has HTML or no picture. */
+  imageRun: ImageRun | null
   dpiRequirement: number
   requestId: string | number | null
 }
@@ -376,7 +392,7 @@ interface PlacedUneditableAnnotation {
 /** Uneditable annotations of the open document. Not edits (no undo, not dirty) until the host burns them in. */
 const uneditableAnnotations = ref<PlacedUneditableAnnotation[]>([])
 
-function addUneditableAnnotation(
+async function addUneditableAnnotation(
   annotation: UneditableAnnotation,
   command: Extract<HostCommand, { type: 'add-annotation' }>,
   reply: (status: 'Success' | 'Error', message: string, id?: number) => void,
@@ -390,10 +406,20 @@ function addUneditableAnnotation(
   }
   const dpi = command.dpi ?? documentDpi.value ?? dpiRequirement()
   const rect = requirementRectToPage(uneditableAnnotationRect(annotation), pageInfos.value[index], edits.rotations.value[index] ?? 0, dpi)
+  const image = annotation.image && !annotation.html ? await loadInlineImage(annotation.image) : null
   const id = nextAnnotationId++
   uneditableAnnotations.value = [
     ...uneditableAnnotations.value,
-    { id, page: index, rect, moved: false, annotation: { ...annotation, type: 'Uneditable' }, dpiRequirement: dpi, requestId: command.requestId },
+    {
+      id,
+      page: index,
+      rect,
+      moved: false,
+      annotation: { ...annotation, type: 'Uneditable' },
+      imageRun: image,
+      dpiRequirement: dpi,
+      requestId: command.requestId,
+    },
   ]
   goToPage(index)
   reply('Success', 'Add success', id)
@@ -402,10 +428,10 @@ function addUneditableAnnotation(
 const shownUneditableAnnotations = computed(() =>
   uneditableAnnotations.value
     .filter((item) => item.page === shownPage.value)
-    .map(({ id, rect, annotation, dpiRequirement, page }) => {
+    .map(({ id, rect, annotation, dpiRequirement, page, imageRun }) => {
       const { dpiX, dpiY } = pageResolution(pageInfos.value[page])
       const sideways = (edits.rotations.value[page] ?? 0) % 180 !== 0
-      return { id, rect, annotation, applied: false, pagePxPerDpi: (sideways ? dpiX : dpiY) / dpiRequirement }
+      return { id, rect, annotation, imageRun, pxPerPt: pxPerPt(page), applied: false, pagePxPerDpi: (sideways ? dpiX : dpiY) / dpiRequirement }
     }),
 )
 
@@ -444,6 +470,27 @@ function clearAnnotations() {
   annotationEditor.value = null
 }
 
+/**
+ * Where a box was drawn, in the page's own pixels as displayed, and that page's resolution.
+ * A 90° or 270° rotation swaps the sides, the same way the status bar does.
+ */
+function burnedPlacement(rect: ImageRect, info: PageInfo, rotation: number) {
+  const displayed = rotateRect(rect, rotation, info.width, info.height)
+  const sideways = ((rotation % 360) + 360) % 180 !== 0
+  const { dpiX, dpiY } = pageResolution(info)
+  return {
+    x: Math.round(displayed.x),
+    y: Math.round(displayed.y),
+    width: Math.round(displayed.width),
+    height: Math.round(displayed.height),
+    dpi: sideways ? dpiY : dpiX,
+    pageSize: {
+      width: sideways ? info.height : info.width,
+      height: sideways ? info.width : info.height,
+    },
+  }
+}
+
 /** Page pixels per DPI-requirement pixel, matching the on-screen size of an uneditable annotation. */
 function pagePxPerRequirement(page: number, dpi: number): number {
   const info = pageInfos.value[page]
@@ -457,7 +504,13 @@ function pagePxPerRequirement(page: number, dpi: number): number {
  * Draws every annotation into its page (one undo step) and removes the overlays.
  * Apply later saves that drawing with the other edits; it does not burn annotations itself.
  */
-function burnAnnotations(command: Extract<HostCommand, { type: 'burn-annotations' }>) {
+/** Page-pixel size of a box as displayed (a 90° or 270° turn swaps the sides). */
+function displayedBoxSize(rect: ImageRect, rotation: number) {
+  const sideways = ((rotation % 360) + 360) % 180 !== 0
+  return sideways ? { width: rect.height, height: rect.width } : { width: rect.width, height: rect.height }
+}
+
+async function burnAnnotations(command: Extract<HostCommand, { type: 'burn-annotations' }>) {
   const reply = (status: 'Success' | 'Error', message: string, burned: BurnedAnnotation[] = []) =>
     notifyHost({ type: 'annotations-burned', requestId: command.requestId, status, message, annotations: burned })
   if (!doc.value || saving.value || hostLoading.value) {
@@ -470,32 +523,43 @@ function burnAnnotations(command: Extract<HostCommand, { type: 'burn-annotations
   const burned: BurnedAnnotation[] = []
   const add = (page: number, op: PageOp) => ops.set(page, [...(ops.get(page) ?? []), op])
   for (const annotation of annotations.value) {
+    const info = pageInfos.value[annotation.page]
     const rotation = edits.rotations.value[annotation.page] ?? 0
-    add(annotation.page, annotationOp(annotation, rotation, pxPerPt(annotation.page)))
+    const size = displayedBoxSize(annotation.rect, rotation)
+    const picture = await rasterizeAnnotationBox(annotation.html, size.width, size.height)
+    const text = picture ? annotation.text : await embedRichTextImages(annotation.text)
+    add(annotation.page, annotationOp({ ...annotation, text }, rotation, pxPerPt(annotation.page), picture))
+    const placed = burnedPlacement(annotation.rect, info, rotation)
     burned.push({
       annotationId: annotation.id,
       type: 'Editable',
       requestId: annotation.requestId ?? null,
       pageIndex: Math.max(0, visiblePages.value.indexOf(annotation.page)),
+      ...placed,
     })
   }
   for (const item of uneditableAnnotations.value) {
     const info = pageInfos.value[item.page]
     const rotation = edits.rotations.value[item.page] ?? 0
     const scale = pagePxPerRequirement(item.page, item.dpiRequirement)
-    add(item.page, uneditableAnnotationOp(item.annotation, item.rect, rotation, pxPerPt(item.page), scale))
+    const size = displayedBoxSize(item.rect, rotation)
+    const picture = await rasterizeAnnotationBox(item.annotation.html, size.width, size.height)
+    let imageRun = picture ? null : item.imageRun
+    if (imageRun) {
+      const [paragraph] = await embedRichTextImages([{ align: 'left', runs: [imageRun] }])
+      const run = paragraph.runs[0]
+      if (run && isImageRun(run)) imageRun = run
+    }
+    add(item.page, uneditableAnnotationOp(item.annotation, item.rect, rotation, pxPerPt(item.page), scale, picture, imageRun))
     const position = Math.max(0, visiblePages.value.indexOf(item.page))
-    const page = pageRectToRequirement({ x: 0, y: 0, width: info.width, height: info.height }, info, rotation, item.dpiRequirement)
-    const placed = item.moved
-      ? pageRectToRequirement(item.rect, info, rotation, item.dpiRequirement)
-      : { x: item.annotation.left, y: item.annotation.top }
+    const placed = burnedPlacement(item.rect, info, rotation)
     burned.push({
       annotationId: item.id,
       type: 'Uneditable',
       requestId: item.requestId,
       pageIndex: position,
-      annotation: placedUneditableAnnotation(item.annotation, placed.x, placed.y, position),
-      pageSize: { width: page.width, height: page.height },
+      ...placed,
+      annotation: placedUneditableAnnotation(item.annotation, placed.x, placed.y, placed.width, placed.height, position),
     })
   }
   edits.addOps(ops)
@@ -1212,13 +1276,13 @@ function onKeydown(event: KeyboardEvent) {
   } else if ((event.key === 'Delete' || event.key === 'Backspace') && areaSelection.value) {
     event.preventDefault()
     eraseArea()
-  } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+  } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && toolbarButtonShown('undo')) {
     event.preventDefault()
     revertEdits(edits.undo)
-  } else if (event.key === 'PageDown') {
+  } else if (event.key === 'PageDown' && toolbarButtonShown('page-nav')) {
     event.preventDefault()
     goToPosition(pagePosition.value + 1)
-  } else if (event.key === 'PageUp') {
+  } else if (event.key === 'PageUp' && toolbarButtonShown('page-nav')) {
     event.preventDefault()
     goToPosition(pagePosition.value - 1)
   }
@@ -1253,10 +1317,10 @@ onMounted(() => {
         void loadServerDocument(command.id)
         break
       case 'add-annotation':
-        addHostAnnotation(command)
+        void addHostAnnotation(command)
         break
       case 'burn-annotations':
-        burnAnnotations(command)
+        void burnAnnotations(command)
         break
       case 'remove-uneditable-annotation':
         removeUneditableAnnotation(command)
@@ -1267,6 +1331,9 @@ onMounted(() => {
       case 'set-icons':
         setIcons(command.icons)
         if (command.iconFont !== undefined) setIconFont(command.iconFont)
+        break
+      case 'set-buttons':
+        setToolbarButtons(command.buttons)
         break
       case 'set-actions':
         setActionBrands(command)

@@ -1,5 +1,6 @@
 import UTIF, { type IFD } from 'utif'
 import { drawRichText } from '../annotations/drawRichText'
+import { isImageRun, type RichText } from '../annotations/richText'
 import { BORDER_COLOR, BORDER_WIDTH_PT } from '../annotations/richText'
 import { encodePage, type EncodedPage } from '../export/encodedPage'
 import { pdfFile } from '../export/pdfFile'
@@ -99,7 +100,7 @@ function getDecodedPage(pageIndex: number): OffscreenCanvas {
 }
 
 /** The page with its edits applied. Never modifies the cached decoded page. */
-function editedPage(pageIndex: number, ops: readonly PageOp[]): OffscreenCanvas {
+async function editedPage(pageIndex: number, ops: readonly PageOp[]): Promise<OffscreenCanvas> {
   const base = getDecodedPage(pageIndex)
   if (ops.length === 0) return base
 
@@ -119,7 +120,7 @@ function editedPage(pageIndex: number, ops: readonly PageOp[]): OffscreenCanvas 
       canvas = toPaper(canvas, op.width, op.height)
     } else if (op.type === 'text') {
       flush()
-      drawText(canvas, op)
+      await drawText(canvas, op)
     } else if (op.type === 'scale') {
       flush()
       canvas = scaleContent(canvas, op.factor)
@@ -143,8 +144,29 @@ function strokeDash(dash: 'solid' | 'dashed' | 'dotted', width: number): number[
   return []
 }
 
+/** Decodes each inline picture once so it can be drawn in the line. One that will not decode is skipped. */
+async function annotationImages(text: RichText): Promise<Map<string, ImageBitmap>> {
+  const urls = new Set<string>()
+  for (const paragraph of text) {
+    for (const run of paragraph.runs) {
+      if (isImageRun(run)) urls.add(run.image)
+    }
+  }
+  const images = new Map<string, ImageBitmap>()
+  await Promise.all(
+    [...urls].map(async (url) => {
+      try {
+        images.set(url, await createImageBitmap(await (await fetch(url)).blob()))
+      } catch {
+        // The gap stays the picture's size; the rest of the line still draws.
+      }
+    }),
+  )
+  return images
+}
+
 /** Draws an annotation's text starting at its box's on-screen top-left corner, upright for the page's rotation. */
-function drawText(canvas: OffscreenCanvas, op: TextOp) {
+async function drawText(canvas: OffscreenCanvas, op: TextOp) {
   const { x, y, width, height } = op.rect
   const rotation = ((op.rotation % 360) + 360) % 360
   const corner = {
@@ -159,18 +181,28 @@ function drawText(canvas: OffscreenCanvas, op: TextOp) {
   ctx.rotate((-rotation * Math.PI) / 180)
   const [boxWidth, boxHeight] = rotation % 180 === 0 ? [width, height] : [height, width]
   if (op.opacity !== undefined) ctx.globalAlpha = Math.min(Math.max(op.opacity, 0), 1)
+  let textTop = 0
+  let fillHeight = boxHeight
+  if (op.fill || op.valign === 'middle' || op.valign === 'bottom') {
+    const measured = drawRichText(context(new OffscreenCanvas(Math.max(1, boxWidth), Math.max(1, boxHeight))), op.text, boxWidth, op.pxPerPt)
+    if (op.valign === 'middle') textTop = Math.max(0, (boxHeight - measured) / 2)
+    else if (op.valign === 'bottom') textTop = Math.max(0, boxHeight - measured)
+    else fillHeight = Math.max(boxHeight, measured)
+  }
   if (op.fill) {
     ctx.fillStyle = op.fill
-    ctx.fillRect(0, 0, boxWidth, boxHeight)
+    ctx.fillRect(0, 0, boxWidth, fillHeight)
   }
-  let textTop = 0
-  if (op.valign === 'middle' || op.valign === 'bottom') {
-    const measured = drawRichText(context(new OffscreenCanvas(Math.max(1, boxWidth), Math.max(1, boxHeight))), op.text, boxWidth, op.pxPerPt)
-    textTop = op.valign === 'middle' ? Math.max(0, (boxHeight - measured) / 2) : Math.max(0, boxHeight - measured)
-  }
+  if (op.picture) await drawPicture(ctx, op.picture, boxWidth, boxHeight)
+  const images = await annotationImages(op.text)
   ctx.save()
   ctx.translate(0, textTop)
-  const textHeight = drawRichText(ctx, op.text, boxWidth, op.pxPerPt)
+  let textHeight = 0
+  try {
+    textHeight = drawRichText(ctx, op.text, boxWidth, op.pxPerPt, images)
+  } finally {
+    for (const bitmap of images.values()) bitmap.close()
+  }
   ctx.restore()
   if (op.border) {
     const lineWidth = BORDER_WIDTH_PT * op.pxPerPt
@@ -185,6 +217,17 @@ function drawText(canvas: OffscreenCanvas, op: TextOp) {
     ctx.strokeRect(op.stroke.width / 2, op.stroke.width / 2, boxWidth - op.stroke.width, boxHeight - op.stroke.width)
   }
   ctx.restore()
+}
+
+/** Draws a rasterized image or HTML snapshot into the annotation box. A bad picture is skipped. */
+async function drawPicture(ctx: OffscreenCanvasRenderingContext2D, picture: string, width: number, height: number) {
+  try {
+    const bitmap = await createImageBitmap(await (await fetch(picture)).blob())
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    bitmap.close()
+  } catch {
+    // The text still burns in when the snapshot cannot be decoded.
+  }
 }
 
 /** A new white `width` x `height` canvas with `source` scaled to fit (aspect kept) and centered. */
@@ -248,8 +291,8 @@ function resize(source: OffscreenCanvas, width: number, height: number): Offscre
 /** Longest edge the page is reduced to for skew detection; plenty for lines of text, and quick. */
 const SKEW_DETECTION_SIZE = 1600
 
-function skewAngle(pageIndex: number, ops: readonly PageOp[]): number {
-  const page = editedPage(pageIndex, ops)
+async function skewAngle(pageIndex: number, ops: readonly PageOp[]): Promise<number> {
+  const page = await editedPage(pageIndex, ops)
   const scale = Math.min(1, SKEW_DETECTION_SIZE / Math.max(page.width, page.height))
   const small = scale < 1 ? resize(page, Math.round(page.width * scale), Math.round(page.height * scale)) : page
   const image = context(small).getImageData(0, 0, small.width, small.height)
@@ -279,13 +322,13 @@ const MIN_INK_SAMPLES = 16
  * whose whole footprint sits inside the guide count, so ink just outside a keep-clear box (the skewed
  * page's tilted lines run along that edge) does not keep the warning after the box is cleared.
  */
-function inspectRegions(
+async function inspectRegions(
   pageIndex: number,
   ops: readonly PageOp[],
   regions: readonly { id: string; rect: { x: number; y: number; width: number; height: number } }[],
-): string[] {
+): Promise<string[]> {
   if (regions.length === 0) return []
-  const full = editedPage(pageIndex, ops)
+  const full = await editedPage(pageIndex, ops)
   const scale = Math.min(1, INSPECT_MAX_EDGE / Math.max(full.width, full.height))
   const width = Math.max(1, Math.round(full.width * scale))
   const height = Math.max(1, Math.round(full.height * scale))
@@ -325,8 +368,8 @@ function inspectRegions(
 }
 
 /** The page as shown: edits applied, turned by `rotation` (a multiple of 90°), on white. */
-function orientedPage(pageIndex: number, ops: readonly PageOp[], rotation: number): OffscreenCanvas {
-  const page = editedPage(pageIndex, ops)
+async function orientedPage(pageIndex: number, ops: readonly PageOp[], rotation: number): Promise<OffscreenCanvas> {
+  const page = await editedPage(pageIndex, ops)
   const degrees = ((rotation % 360) + 360) % 360
   const sideways = degrees % 180 !== 0
   const canvas = new OffscreenCanvas(sideways ? page.height : page.width, sideways ? page.width : page.height)
@@ -343,7 +386,7 @@ function orientedPage(pageIndex: number, ops: readonly PageOp[], rotation: numbe
 async function exportPages(pages: readonly ExportPage[], format: ExportFormat): Promise<Blob> {
   const encoded: EncodedPage[] = []
   for (const { page, ops, rotation, dpiX, dpiY } of pages) {
-    const canvas = orientedPage(page, ops, rotation)
+    const canvas = await orientedPage(page, ops, rotation)
     const image = context(canvas).getImageData(0, 0, canvas.width, canvas.height)
     const sideways = (((rotation % 360) + 360) % 360) % 180 !== 0
     encoded.push(await encodePage(image, sideways ? dpiY : dpiX, sideways ? dpiX : dpiY))
@@ -390,7 +433,7 @@ async function thumbnailBlob(pageIndex: number, ops: readonly PageOp[]): Promise
     const { rgba, width, height } = decodeRgba(pageIndex)
     return downscaleRgba(rgba, width, height, THUMBNAIL_SIZE).convertToBlob({ type: 'image/png' })
   }
-  return makeThumbnail(editedPage(pageIndex, ops))
+  return makeThumbnail(await editedPage(pageIndex, ops))
 }
 
 function makeThumbnail(source: OffscreenCanvas): Promise<Blob> {
@@ -452,7 +495,7 @@ function downscaleRgba(
 }
 
 async function render(pageIndex: number, ops: readonly PageOp[]): Promise<{ blob: Blob; thumbnail: Blob }> {
-  const canvas = editedPage(pageIndex, ops)
+  const canvas = await editedPage(pageIndex, ops)
   const [blob, thumbnail] = await Promise.all([canvas.convertToBlob({ type: 'image/png' }), makeThumbnail(canvas)])
   return { blob, thumbnail }
 }
@@ -482,14 +525,14 @@ self.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
         post({ id: request.id, type: 'exported', blob: await exportPages(request.pages, request.format) })
         break
       case 'skew':
-        post({ id: request.id, type: 'skew', page: request.page, angle: skewAngle(request.page, request.ops) })
+        post({ id: request.id, type: 'skew', page: request.page, angle: await skewAngle(request.page, request.ops) })
         break
       case 'inspect-regions':
         post({
           id: request.id,
           type: 'regions-hit',
           page: request.page,
-          hits: inspectRegions(request.page, request.ops, request.regions),
+          hits: await inspectRegions(request.page, request.ops, request.regions),
         })
         break
     }

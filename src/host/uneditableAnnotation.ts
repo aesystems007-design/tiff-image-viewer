@@ -1,4 +1,6 @@
-import { DEFAULT_TEXT_COLOR, DEFAULT_TEXT_SIZE, type RichText, type TextAlign } from '../annotations/richText'
+import { annotationBackgroundField } from '../annotations/background'
+import { sanitizeAnnotationHtml } from '../annotations/htmlContent'
+import { DEFAULT_TEXT_COLOR, DEFAULT_TEXT_SIZE, type ImageRun, type RichText, type TextAlign } from '../annotations/richText'
 import type { TextOp } from '../tiff/pageOps'
 import type { ImageRect } from '../viewer/imageRect'
 
@@ -40,6 +42,20 @@ export interface UneditableAnnotation {
   opacity?: number
   isFill?: boolean
   fillColor?: string
+  /**
+   * Overlay fill. A color, or `transparent` / null for none.
+   * Omitted, the overlay uses `fillColor` when `isFill` (otherwise none).
+   */
+  placeBackground?: string | null
+  /**
+   * Fill drawn into the page. A color, or `transparent` / null for none.
+   * Omitted, the burn uses `fillColor` when `isFill` (otherwise none).
+   */
+  burnBackground?: string | null
+  /** Image placed in the box. A data URL or an http(s) address. Drawn with the text unless `html` is set. */
+  image?: string | null
+  /** HTML drawn instead of `text`. CSS and `<img>` are kept; scripts are dropped. */
+  html?: string | null
   isStroke?: boolean
   strokeColor?: string
   strokeWidth?: number
@@ -114,6 +130,8 @@ export function uneditableAnnotationOp(
   rotation: number,
   pxPerPt: number,
   pagePxPerRequirement: number,
+  picture?: string | null,
+  imageRun?: ImageRun | null,
 ): TextOp {
   const fontPx = Number(annotation.fontSize)
   const fontPagePx = (Number.isFinite(fontPx) && fontPx > 0 ? fontPx : 41.67) * pagePxPerRequirement
@@ -126,21 +144,31 @@ export function uneditableAnnotationOp(
     color: annotation.fontColor || DEFAULT_TEXT_COLOR,
     size: size > 0 ? size : DEFAULT_TEXT_SIZE,
   }
+  const html = sanitizeAnnotationHtml(annotation.html)
   const lines = uneditableAnnotationText(annotation).replace(/\r\n?/g, '\n').replace(/\n+$/, '').split('\n')
   const text: RichText = (lines.length ? lines : ['']).map((line) => ({
     align,
     runs: line === '' ? [] : [{ ...run, text: line }],
   }))
+  if (!html && imageRun) {
+    const last = text[text.length - 1] ?? { align, runs: [] }
+    if (text.length === 0) text.push(last)
+    const tail = last.runs[last.runs.length - 1]
+    if (tail && !('image' in tail) && tail.text !== '' && !/\s$/.test(tail.text)) last.runs.push({ ...tail, text: ' ' })
+    last.runs.push(imageRun)
+  }
   const opacity = Number(annotation.opacity)
   const valign = VALIGN[(annotation.alignItem || 'top').toLowerCase()] ?? 'top'
   const strokeWidth = Math.max(1, (Number(annotation.strokeWidth) || 1) * pagePxPerRequirement)
+  const fill = annotationBurnBackground(annotation)
   return {
     type: 'text',
     rect: { ...rect },
     rotation,
     pxPerPt,
-    text,
-    ...(annotation.isFill ? { fill: annotation.fillColor || '#ffff00' } : {}),
+    text: html ? [] : text,
+    ...(fill ? { fill } : {}),
+    ...(picture ? { picture } : {}),
     ...(Number.isFinite(opacity) ? { opacity: Math.min(Math.max(opacity, 0), 100) / 100 } : {}),
     ...(valign !== 'top' ? { valign } : {}),
     ...(annotation.isStroke
@@ -155,14 +183,33 @@ export function uneditableAnnotationOp(
   }
 }
 
-/** The annotation as sent, moved to `left` / `top` (requirement pixels on the page displayed at position `pageIndex`). */
+/** The annotation as sent, placed where it was drawn (the page's own pixels, at display position `pageIndex`). */
 export function placedUneditableAnnotation(
   annotation: UneditableAnnotation,
   left: number,
   top: number,
+  width: number,
+  height: number,
   pageIndex: number,
 ): UneditableAnnotation {
-  return { ...annotation, left, top, pageIndex }
+  return { ...annotation, left, top, width, height, pageIndex }
+}
+
+/** `fillColor` when `isFill`, otherwise no fill. */
+function fillColor(annotation: UneditableAnnotation): string | null {
+  return annotation.isFill ? annotation.fillColor || '#ffff00' : null
+}
+
+/** Overlay fill. `placeBackground` wins; otherwise the `isFill` color. */
+export function annotationPlaceBackground(annotation: UneditableAnnotation): string | null {
+  const set = annotationBackgroundField(annotation, 'placeBackground')
+  return set === undefined ? fillColor(annotation) : set
+}
+
+/** Fill drawn into the page. `burnBackground` wins; otherwise the `isFill` color. */
+export function annotationBurnBackground(annotation: UneditableAnnotation): string | null {
+  const set = annotationBackgroundField(annotation, 'burnBackground')
+  return set === undefined ? fillColor(annotation) : set
 }
 
 const DASHES: Record<string, string> = { solid: 'solid', dash: 'dashed', dashed: 'dashed', dot: 'dotted', dotted: 'dotted' }
@@ -182,7 +229,7 @@ export function uneditableAnnotationStyle(annotation: UneditableAnnotation, scal
     textAlign: (annotation.textAlign || 'left').toLowerCase(),
     textDecoration: decorations.join(' ') || 'none',
     justifyContent: ALIGN_ITEMS[(annotation.alignItem || 'top').toLowerCase()] ?? 'flex-start',
-    background: annotation.isFill ? annotation.fillColor || '#ffff00' : 'transparent',
+    background: annotationPlaceBackground(annotation) ?? 'transparent',
   }
   if (annotation.isStroke) {
     const width = Math.max(1, (Number(annotation.strokeWidth) || 1) * scale)

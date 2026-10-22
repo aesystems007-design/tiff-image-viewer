@@ -73,7 +73,7 @@ export interface TextOp {
   text: RichText
   /** Frame around the box (grown to fit the text, like the overlay). */
   border?: boolean
-  /** Box fill behind the text (an uneditable annotation's `fillColor`). */
+  /** Box fill behind the text (the annotation's burn background). Omitted leaves the page underneath. */
   fill?: string
   /** 0–1. Covers the fill, the text and the stroke. */
   opacity?: number
@@ -81,6 +81,11 @@ export interface TextOp {
   valign?: 'top' | 'middle' | 'bottom'
   /** Outline of the box, in page pixels. */
   stroke?: { color: string; width: number; dash: 'solid' | 'dashed' | 'dotted' }
+  /**
+   * PNG data URL of HTML rasterized at the box size, drawn behind the text and filling the box.
+   * Inline pictures are part of `text` and are drawn in the line. Omitted when there is no HTML.
+   */
+  picture?: string
 }
 
 /** Resizes the page to `width` x `height` px: content scaled to fit (aspect kept), centered on white. */

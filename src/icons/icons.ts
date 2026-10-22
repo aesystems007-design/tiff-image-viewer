@@ -65,6 +65,7 @@ export const ICONS = {
   'align-center': stroke('<path d="M4 6h16M7 10h10M4 14h16M8 18h8"/>'),
   'align-right': stroke('<path d="M4 6h16M10 10h10M4 14h16M12 18h8"/>'),
   edit: stroke('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/>'),
+  image: stroke('<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m21 16-5-4-9 7"/>'),
   close: stroke('<path d="M6 6l12 12M18 6 6 18"/>'),
 } as const
 

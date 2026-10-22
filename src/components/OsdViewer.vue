@@ -2,6 +2,7 @@
 import OpenSeadragon from 'openseadragon'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { Annotation } from '../annotations/annotation'
+import type { ImageRun } from '../annotations/richText'
 import AnnotationBox from './AnnotationBox.vue'
 import UneditableAnnotationBox from './UneditableAnnotationBox.vue'
 import type { UneditableAnnotation } from '../host/uneditableAnnotation'
@@ -48,6 +49,10 @@ const props = defineProps<{
     id: number
     rect: ImageRect
     annotation: UneditableAnnotation
+    /** Picture inline with the label. */
+    imageRun: ImageRun | null
+    /** Page pixels per point. */
+    pxPerPt: number
     applied: boolean
     pagePxPerDpi: number
   }[]
@@ -471,6 +476,8 @@ const annotationBoxes = computed(() => {
       top: box.top,
       width: box.width,
       minHeight: box.height,
+      contentWidth: screenPxPerImagePx > 0 ? box.width / screenPxPerImagePx : box.width,
+      contentHeight: screenPxPerImagePx > 0 ? box.height / screenPxPerImagePx : box.height,
       pxPerPt: annotation.pxPerPt * screenPxPerImagePx,
     }
   })
@@ -481,11 +488,17 @@ const uneditableBoxes = computed(() => {
   const image = item()
   if (!viewer || !image || !guidesReady.value) return []
   const screenPxPerImagePx = image.viewportToImageZoom(viewer.viewport.getZoom(true))
-  return (props.uneditableAnnotations ?? []).map((item) => ({
-    item,
-    ...screenBox(image, draggedRect('uneditable', item.id, item.rect)),
-    scale: item.pagePxPerDpi * screenPxPerImagePx,
-  }))
+  return (props.uneditableAnnotations ?? []).map((placed) => {
+    const box = screenBox(image, draggedRect('uneditable', placed.id, placed.rect))
+    return {
+      item: placed,
+      ...box,
+      contentWidth: screenPxPerImagePx > 0 ? box.width / screenPxPerImagePx : box.width,
+      contentHeight: screenPxPerImagePx > 0 ? box.height / screenPxPerImagePx : box.height,
+      pxPerPt: placed.pxPerPt * screenPxPerImagePx,
+      scale: placed.pagePxPerDpi * screenPxPerImagePx,
+    }
+  })
 })
 
 function viewerPoint(event: PointerEvent): { x: number; y: number } {
@@ -832,8 +845,12 @@ defineExpose({
           :min-height="box.minHeight"
           :text="box.annotation.text"
           :px-per-pt="box.pxPerPt"
+          :html="box.annotation.html"
+          :content-width="box.contentWidth"
+          :content-height="box.contentHeight"
           :active="box.annotation.id === activeAnnotation"
           :border="box.annotation.border"
+          :background="box.annotation.placeBackground"
           @press-move="startAnnotationMove(box.annotation, $event)"
           @press-resize="startAnnotationResize(box, $event)"
           @edit="emit('annotation-edit', box.annotation.id)"
@@ -848,7 +865,11 @@ defineExpose({
           :top="box.top"
           :width="box.width"
           :height="box.height"
+          :content-width="box.contentWidth"
+          :content-height="box.contentHeight"
           :annotation="box.item.annotation"
+          :image-run="box.item.imageRun"
+          :px-per-pt="box.pxPerPt"
           :scale="box.scale"
           :applied="box.item.applied"
           @press-move="startBoxMove('uneditable', box.item.id, box.item.rect, $event)"

@@ -11,11 +11,21 @@ export interface Annotation {
   id: number
   page: number
   rect: ImageRect
+  /** Paragraphs of styled text. A run may be a picture inline with the words. */
   text: RichText
+  /**
+   * Sanitized HTML drawn instead of the rich text (CSS and `<img>` kept).
+   * Null means the box is the rich text.
+   */
+  html: string | null
   /** Set for annotations the host adds (e.g. `VerbiageStamp`); adding another with the same name replaces it. */
   name?: string
   /** Frame around the box (see BORDER_WIDTH_PT / BORDER_COLOR), drawn in when the host burns it. */
   border?: boolean
+  /** Overlay fill while the box is being placed. Null draws no fill. */
+  placeBackground: string | null
+  /** Fill drawn into the page on burn. Null leaves the page underneath. */
+  burnBackground: string | null
   /** The `requestId` from the host command that added it, echoed when it is burned in. */
   requestId?: string | number | null
 }
@@ -28,13 +38,15 @@ export const ANNOTATION_WIDTH_INCHES = 3
 export const ANNOTATION_HEIGHT_INCHES = 0.5
 
 /** The op that draws `annotation` into its page, upright for the page's current rotation. Used when the host burns it in. */
-export function annotationOp(annotation: Annotation, rotation: number, pxPerPt: number): TextOp {
+export function annotationOp(annotation: Annotation, rotation: number, pxPerPt: number, picture?: string | null): TextOp {
   return {
     type: 'text',
     rect: { ...annotation.rect },
     rotation,
     pxPerPt,
-    text: JSON.parse(JSON.stringify(annotation.text)),
+    text: annotation.html ? [] : JSON.parse(JSON.stringify(annotation.text)),
     ...(annotation.border ? { border: true } : {}),
+    ...(annotation.burnBackground ? { fill: annotation.burnBackground } : {}),
+    ...(picture ? { picture } : {}),
   }
 }

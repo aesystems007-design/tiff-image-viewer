@@ -1,4 +1,6 @@
 import { VERBIAGE_STAMP } from '../annotations/annotation'
+import { annotationBackgroundField } from '../annotations/background'
+import { annotationImageSource, sanitizeAnnotationHtml } from '../annotations/htmlContent'
 import { DEFAULT_TEXT_COLOR, DEFAULT_TEXT_SIZE, type RichText, type TextAlign } from '../annotations/richText'
 import type { PageInfo } from '../tiff/protocol'
 import type { ImageRect } from '../viewer/imageRect'
@@ -10,7 +12,8 @@ import { requirementRectToPage } from './dpiRequirement'
  */
 export interface LegacyAnnotation {
   Name?: string | null
-  Text: string
+  /** Required unless `html` or `image` is set. */
+  Text?: string | null
   XPos: number
   YPos: number
   Width: number
@@ -29,6 +32,16 @@ export interface LegacyAnnotation {
   /** LEFT, CENTER or RIGHT. */
   Align?: string | null
   Border?: string | boolean | null
+  /** Overlay fill. A color, or `transparent` / null for none. Omitted draws no fill. */
+  placeBackground?: string | null
+  /** Fill drawn into the page. A color, or `transparent` / null for none. Omitted draws no fill. */
+  burnBackground?: string | null
+  /** Image placed in the box with the text. A data URL or an http(s) address. `Image` is accepted too. */
+  image?: string | null
+  Image?: string | null
+  /** HTML drawn instead of the rich text. CSS and `<img>` are kept; scripts are dropped. `Html` is accepted too. */
+  html?: string | null
+  Html?: string | null
   /** Pre-rendered image of the stamp from the old system; not used (the text is drawn instead). */
   AnnotationFilename?: string | null
   /** `Editable` (this object) or `Uneditable`. Omitted legacy objects are Editable. */
@@ -43,7 +56,10 @@ function isTrue(value: unknown): boolean {
 export function legacyAnnotationProblem(annotation: unknown): string | null {
   if (!annotation || typeof annotation !== 'object') return 'the annotation is missing'
   const a = annotation as Partial<LegacyAnnotation>
-  if (typeof a.Text !== 'string' || a.Text.trim() === '') return 'the annotation has no Text'
+  const hasText = typeof a.Text === 'string' && a.Text.trim() !== ''
+  const hasHtml = !!sanitizeAnnotationHtml(a.html ?? a.Html)
+  const hasImage = !!annotationImageSource(a.image ?? a.Image)
+  if (!hasText && !hasHtml && !hasImage) return 'the annotation has no Text'
   for (const key of ['XPos', 'YPos', 'Width', 'Height'] as const) {
     if (!Number.isFinite(Number(a[key]))) return `${key} is not a number`
   }
@@ -76,7 +92,7 @@ export function legacyAnnotationText(annotation: LegacyAnnotation, dpiRequiremen
     color: DEFAULT_TEXT_COLOR,
     size,
   }
-  return annotation.Text.replace(/\r\n?/g, '\n')
+  return (annotation.Text || '').replace(/\r\n?/g, '\n')
     .replace(/\n+$/, '')
     .split('\n')
     .map((line) => ({
@@ -101,4 +117,22 @@ export function legacyAnnotationRect(annotation: LegacyAnnotation, page: PageInf
 
 export function legacyAnnotationBorder(annotation: LegacyAnnotation): boolean {
   return isTrue(annotation.Border)
+}
+
+/** Picture inserted inline at the end of the text, or null. */
+export function legacyAnnotationImage(annotation: LegacyAnnotation): string | null {
+  return annotationImageSource(annotation.image ?? annotation.Image)
+}
+
+/** HTML drawn instead of the rich text, or null. */
+export function legacyAnnotationHtml(annotation: LegacyAnnotation): string | null {
+  return sanitizeAnnotationHtml(annotation.html ?? annotation.Html)
+}
+
+/** Overlay fill and the fill drawn into the page. An omitted or invalid color is no fill. */
+export function legacyAnnotationBackgrounds(annotation: LegacyAnnotation): { placeBackground: string | null; burnBackground: string | null } {
+  return {
+    placeBackground: annotationBackgroundField(annotation, 'placeBackground') ?? null,
+    burnBackground: annotationBackgroundField(annotation, 'burnBackground') ?? null,
+  }
 }

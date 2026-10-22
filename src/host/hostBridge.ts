@@ -45,8 +45,9 @@ export type ViewerEvent =
     }
   /**
    * Answer to `burn-annotations`. On success the overlays are gone and the text is a pending page edit
-   * (saved on the next Apply). Each uneditable annotation is the object as sent, with `left` / `top` and
-   * `pageIndex` of where it was drawn.
+   * (saved on the next Apply). Each entry's `x` / `y` / `width` / `height` is where that box was drawn,
+   * in the page's own pixels, and `dpi` is that page's resolution. An uneditable entry also includes the
+   * object as sent, with `left` / `top` / `width` / `height` and `pageIndex` of where it was drawn.
    */
   | {
       type: 'annotations-burned'
@@ -75,10 +76,20 @@ export interface BurnedAnnotation {
   requestId: string | number | null
   /** Display position (0 = first page) of the page it was drawn on. */
   pageIndex: number
+  /**
+   * Where the box was drawn, in the page's own pixels as displayed.
+   * `dpi` is that page's resolution, not the DPI requirement the host used to place the box.
+   */
+  x: number
+  y: number
+  width: number
+  height: number
+  /** The page's resolution. `x` / `y` / `width` / `height` and `pageSize` are pixels at this dpi. */
+  dpi: number
   /** Uneditable only: the object as sent, placed where it was burned. */
   annotation?: UneditableAnnotation
-  /** Uneditable only: size of its page as displayed, in DPI-requirement pixels. */
-  pageSize?: { width: number; height: number }
+  /** Size of its page as displayed, in the same pixels as `x` / `y`. */
+  pageSize: { width: number; height: number }
 }
 
 /**
@@ -149,6 +160,11 @@ export type HostCommand =
    * `iconFont`, when present, is the Font Awesome stylesheet or kit script for `<i>` values (`null` removes it).
    */
   | { type: 'set-icons'; icons: Record<string, string | null>; iconFont: string | null | undefined }
+  /**
+   * Show or hide toolbar buttons by name. `false` hides one. `true`, `null`, or `''` shows it again.
+   * A name left out is left as it is. This does not change icons.
+   */
+  | { type: 'set-buttons'; buttons: Record<string, boolean | null> }
   /**
    * Label and colors for the toolbar Apply and Cancel buttons. A missing button is left as it is.
    * `null` restores that button. A field left out is left as it is; `null` or `''` restores that field.
@@ -310,6 +326,15 @@ function parseCommand(data: unknown): HostCommand | null {
     const cancel = 'cancel' in message ? actionBrandFromHost(message.cancel) : undefined
     if (apply === undefined && cancel === undefined) return null
     return { type: 'set-actions', apply, cancel }
+  }
+
+  if (message.type === 'set-buttons' && message.buttons && typeof message.buttons === 'object') {
+    const buttons: Record<string, boolean | null> = {}
+    for (const [name, value] of Object.entries(message.buttons as Record<string, unknown>)) {
+      if (value === false) buttons[name] = false
+      else if (value === true || value === null || value === '') buttons[name] = null
+    }
+    return { type: 'set-buttons', buttons }
   }
 
   if (message.type === 'set-icons' && message.icons && typeof message.icons === 'object') {

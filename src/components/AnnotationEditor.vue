@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { annotationImageSource } from '../annotations/htmlContent'
 import {
   DEFAULT_TEXT_COLOR,
   DEFAULT_TEXT_SIZE,
   FONT_FAMILY,
   isEmptyText,
+  loadInlineImage,
   richTextFromElement,
   richTextToHtml,
   TEXT_SIZES,
+  type ImageRun,
   type RichText,
 } from '../annotations/richText'
 import AppIcon from './AppIcon.vue'
@@ -23,6 +26,8 @@ const emit = defineEmits<{
   (e: 'cancel'): void
   (e: 'remove'): void
 }>()
+
+const file = ref<HTMLInputElement>()
 
 const editor = ref<HTMLDivElement>()
 const empty = ref(isEmptyText(props.text))
@@ -116,7 +121,71 @@ function setSize(size: number) {
 }
 
 function onInput() {
-  if (editor.value) empty.value = (editor.value.textContent ?? '').replace(/\u200b/g, '').trim() === ''
+  if (!editor.value) return
+  const text = (editor.value.textContent ?? '').replace(/\u200b/g, '').trim()
+  empty.value = text === '' && editor.value.querySelector('img') === null
+}
+
+function pickImage() {
+  file.value?.click()
+}
+
+/** Puts a picture at the caret, in the line with the words. */
+function insertImage(run: ImageRun) {
+  const el = editor.value
+  if (!el) return
+  // Read the caret before focusing: focus fires selectionchange and would move it to the end.
+  const range = (editorRange() ?? savedRange)?.cloneRange() ?? null
+  el.focus()
+  const img = document.createElement('img')
+  img.src = run.image
+  img.alt = ''
+  img.draggable = false
+  img.dataset.width = String(run.width)
+  img.dataset.height = String(run.height)
+  img.style.width = `${run.width}pt`
+  img.style.height = `${run.height}pt`
+  img.style.verticalAlign = 'middle'
+  if (range && el.contains(range.commonAncestorContainer)) {
+    range.collapse(false)
+    range.insertNode(img)
+    range.setStartAfter(img)
+    range.collapse(true)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    savedRange = range.cloneRange()
+  } else {
+    el.appendChild(img)
+  }
+  onInput()
+}
+
+function readImageFile(picked: File) {
+  if (!picked.type.startsWith('image/') || picked.size > 6_000_000) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    const url = annotationImageSource(reader.result)
+    if (!url) return
+    void loadInlineImage(url).then((run) => {
+      if (run) insertImage(run)
+    })
+  }
+  reader.readAsDataURL(picked)
+}
+
+function onImage(event: Event) {
+  const input = event.target as HTMLInputElement
+  const picked = input.files?.[0]
+  input.value = ''
+  if (picked) readImageFile(picked)
+}
+
+function onPaste(event: ClipboardEvent) {
+  const picked = [...(event.clipboardData?.files ?? [])].find((item) => item.type.startsWith('image/'))
+  if (!picked) return
+  event.preventDefault()
+  readImageFile(picked)
 }
 
 function save() {
@@ -190,6 +259,11 @@ onBeforeUnmount(() => document.removeEventListener('selectionchange', onSelectio
         <button type="button" :class="{ active: state.align === 'right' }" title="Align right" @mousedown.prevent @click="exec('justifyRight')">
           <AppIcon name="align-right" />
         </button>
+        <span class="divider" />
+        <button type="button" title="Insert image" @mousedown.prevent @click="pickImage">
+          <AppIcon name="image" />
+        </button>
+        <input ref="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" hidden @change="onImage" />
       </div>
 
       <div
@@ -203,6 +277,7 @@ onBeforeUnmount(() => document.removeEventListener('selectionchange', onSelectio
         :class="{ empty }"
         :style="{ fontFamily: FONT_FAMILY, fontSize: `${DEFAULT_TEXT_SIZE}pt`, color: DEFAULT_TEXT_COLOR }"
         @input="onInput"
+        @paste="onPaste"
       />
 
       <div class="actions">
@@ -366,6 +441,11 @@ select {
 
 .text:focus {
   border-color: #3d64b5;
+}
+
+.text :deep(img) {
+  vertical-align: middle;
+  max-width: 100%;
 }
 
 .text.empty::before {

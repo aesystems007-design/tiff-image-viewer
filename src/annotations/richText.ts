@@ -1,3 +1,5 @@
+import { annotationImageSource } from './htmlContent'
+
 /** A piece of text with one style. Sizes are in points (1/72"). */
 export interface TextRun {
   text: string
@@ -9,11 +11,28 @@ export interface TextRun {
   size: number
 }
 
+/** A picture sitting in the line with the text. Width and height are points, so it scales with the page. */
+export interface ImageRun {
+  image: string
+  width: number
+  height: number
+}
+
+/** One item in a line: styled text, or a picture. */
+export type Run = TextRun | ImageRun
+
+export function isImageRun(run: Run): run is ImageRun {
+  return 'image' in run
+}
+
+/** Longest side of an inline picture, in points (2 inches). Larger pictures scale down, keeping their shape. */
+export const INLINE_IMAGE_MAX_PT = 144
+
 export type TextAlign = 'left' | 'center' | 'right'
 
 export interface TextParagraph {
   align: TextAlign
-  runs: TextRun[]
+  runs: Run[]
 }
 
 /** Rich text as edited in the annotation popup and drawn on the page. Plain data, so it can go to the worker. */
@@ -29,12 +48,51 @@ export const BORDER_WIDTH_PT = 0.72
 export const BORDER_COLOR = 'rgba(0, 0, 0, 0.75)'
 
 export function isEmptyText(text: RichText): boolean {
-  return text.every((paragraph) => paragraph.runs.every((run) => run.text.trim() === ''))
+  return text.every((paragraph) => paragraph.runs.every((run) => (isImageRun(run) ? false : run.text.trim() === '')))
 }
 
-/** Font size of a paragraph's line box (its largest run). */
+/** Font size of a paragraph's line box (its largest text run). */
 export function paragraphSize(paragraph: TextParagraph): number {
-  return paragraph.runs.reduce((size, run) => Math.max(size, run.size), 0) || DEFAULT_TEXT_SIZE
+  return paragraph.runs.reduce((size, run) => (isImageRun(run) ? size : Math.max(size, run.size)), 0) || DEFAULT_TEXT_SIZE
+}
+
+/** Point size for a picture of `naturalWidth` × `naturalHeight` CSS pixels, capped at `INLINE_IMAGE_MAX_PT`. */
+export function inlineImageBox(naturalWidth: number, naturalHeight: number): { width: number; height: number } {
+  const widthPx = naturalWidth > 0 ? naturalWidth : 96
+  const heightPx = naturalHeight > 0 ? naturalHeight : 96
+  let width = widthPx * 0.75
+  let height = heightPx * 0.75
+  const longest = Math.max(width, height)
+  if (longest > INLINE_IMAGE_MAX_PT) {
+    width *= INLINE_IMAGE_MAX_PT / longest
+    height *= INLINE_IMAGE_MAX_PT / longest
+  }
+  const round = (value: number) => Math.round(Math.max(8, value) * 100) / 100
+  return { width: round(width), height: round(height) }
+}
+
+/** Reads a picture's pixel size and returns an inline run, or null when it cannot be loaded. */
+export function loadInlineImage(src: string): Promise<ImageRun | null> {
+  const image = annotationImageSource(src)
+  if (!image) return Promise.resolve(null)
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => resolve({ image, ...inlineImageBox(img.naturalWidth, img.naturalHeight) })
+    img.onerror = () => resolve(null)
+    img.src = image
+  })
+}
+
+/** The same text with `image` at the end of the last line, after a space when the line ends on a word. */
+export function textWithInlineImage(text: RichText, image: ImageRun): RichText {
+  const paragraphs: RichText = text.length
+    ? text.map((paragraph) => ({ align: paragraph.align, runs: [...paragraph.runs] }))
+    : [{ align: 'left', runs: [] }]
+  const last = paragraphs[paragraphs.length - 1]
+  const tail = last.runs[last.runs.length - 1]
+  if (tail && !isImageRun(tail) && tail.text !== '' && !/\s$/.test(tail.text)) last.runs.push({ ...tail, text: ' ' })
+  last.runs.push(image)
+  return paragraphs
 }
 
 /** CSS for a run; `pxPerPt` converts point sizes to CSS pixels. */
@@ -57,8 +115,13 @@ export function richTextToHtml(text: RichText): string {
   return text
     .map((paragraph) => {
       const runs = paragraph.runs
-        .filter((run) => run.text !== '')
         .map((run) => {
+          if (isImageRun(run)) {
+            const src = annotationImageSource(run.image)
+            if (!src) return ''
+            return `<img src="${escapeHtml(src)}" alt="" draggable="false" data-width="${run.width}" data-height="${run.height}" style="width: ${run.width}pt; height: ${run.height}pt; vertical-align: middle" />`
+          }
+          if (run.text === '') return ''
           const style = Object.entries({ ...runStyle(run, 1), fontSize: `${run.size}pt` })
             .map(([key, value]) => `${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}: ${value}`)
             .join('; ')
@@ -120,6 +183,17 @@ export function richTextFromElement(root: HTMLElement): RichText {
           color: toHex(style.color),
           size: Math.round(Number.parseFloat(style.fontSize) * 0.75 * 2) / 2 || DEFAULT_TEXT_SIZE,
         })
+      } else if (child instanceof HTMLImageElement) {
+        const src = annotationImageSource(child.getAttribute('src'))
+        if (!src) continue
+        const width = Number(child.dataset.width)
+        const height = Number(child.dataset.height)
+        const paragraph: TextParagraph = current ?? start(child.parentElement ?? root)
+        paragraph.runs.push({
+          image: src,
+          width: Number.isFinite(width) && width > 0 ? width : INLINE_IMAGE_MAX_PT,
+          height: Number.isFinite(height) && height > 0 ? height : INLINE_IMAGE_MAX_PT,
+        })
       } else if (child instanceof HTMLBRElement) {
         if (!current) start(child.parentElement ?? root)
         current = null
@@ -138,12 +212,14 @@ export function richTextFromElement(root: HTMLElement): RichText {
   return paragraphs
 }
 
-function mergeRuns(runs: TextRun[]): TextRun[] {
-  const merged: TextRun[] = []
+function mergeRuns(runs: Run[]): Run[] {
+  const merged: Run[] = []
   for (const run of runs) {
     const last = merged[merged.length - 1]
     if (
       last &&
+      !isImageRun(last) &&
+      !isImageRun(run) &&
       last.bold === run.bold &&
       last.italic === run.italic &&
       last.underline === run.underline &&

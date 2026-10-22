@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { BORDER_COLOR, BORDER_WIDTH_PT, FONT_FAMILY, LINE_HEIGHT, paragraphSize, runStyle, type RichText } from '../annotations/richText'
+import { BORDER_COLOR, BORDER_WIDTH_PT, FONT_FAMILY, LINE_HEIGHT, isImageRun, paragraphSize, runStyle, type RichText } from '../annotations/richText'
+import AnnotationHtml from './AnnotationHtml.vue'
 import AppIcon from './AppIcon.vue'
 
 defineProps<{
@@ -11,9 +12,16 @@ defineProps<{
   text: RichText
   /** Screen pixels per point at the current zoom. */
   pxPerPt: number
+  /** HTML drawn instead of the rich text. */
+  html?: string | null
+  /** Page-pixel size of the box, so HTML pixel sizes match the page. */
+  contentWidth: number
+  contentHeight: number
   active: boolean
   /** Frame around the box (drawn in on Apply too); an inset shadow, so the text doesn't move. */
   border?: boolean
+  /** Overlay fill. Null or omitted leaves the box clear (the active outline still shows). */
+  background?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -36,18 +44,36 @@ const emit = defineEmits<{
       fontFamily: FONT_FAMILY,
       lineHeight: LINE_HEIGHT,
       boxShadow: border ? `inset 0 0 0 ${BORDER_WIDTH_PT * pxPerPt}px ${BORDER_COLOR}` : undefined,
+      background: background || undefined,
     }"
     title="Annotation (not applied yet): drag to move, double-click to edit"
     @pointerdown.stop="emit('press-move', $event)"
     @dblclick.stop="emit('edit')"
   >
+    <AnnotationHtml
+      v-if="html"
+      :html="html"
+      :content-width="contentWidth"
+      :content-height="contentHeight"
+      :scale="contentWidth > 0 ? width / contentWidth : 1"
+    />
     <div
-      v-for="(paragraph, i) in text"
+      v-for="(paragraph, i) in html ? [] : text"
       :key="i"
       class="paragraph"
       :style="{ textAlign: paragraph.align, fontSize: `${paragraphSize(paragraph) * pxPerPt}px` }"
     >
-      <span v-for="(run, j) in paragraph.runs" :key="j" :style="runStyle(run, pxPerPt)">{{ run.text }}</span>
+      <template v-for="(run, j) in paragraph.runs" :key="j">
+        <img
+          v-if="isImageRun(run)"
+          class="inline-image"
+          :src="run.image"
+          alt=""
+          draggable="false"
+          :style="{ width: `${run.width * pxPerPt}px`, height: `${run.height * pxPerPt}px` }"
+        />
+        <span v-else :style="runStyle(run, pxPerPt)">{{ run.text }}</span>
+      </template>
       <br v-if="paragraph.runs.length === 0" />
     </div>
     <template v-if="active">
@@ -80,6 +106,10 @@ const emit = defineEmits<{
 .annotation.active {
   outline: 2px solid #2f6fd1;
   background: rgb(47 111 209 / 6%);
+}
+
+.inline-image {
+  vertical-align: middle;
 }
 
 .paragraph {
