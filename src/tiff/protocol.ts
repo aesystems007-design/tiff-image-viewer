@@ -33,6 +33,11 @@ export type WorkerRequest =
    */
   | { id: number; type: 'replace'; buffer: ArrayBuffer; pages: readonly number[] }
   | { id: number; type: 'render'; page: number; revision: number; ops: readonly PageOp[] }
+  /**
+   * Redraws the single page in `buffer` (a one-page TIFF of the original strips) with `ops` and `rotation`.
+   * Used by extra workers during export. The document worker does not send this to itself.
+   */
+  | { id: number; type: 'redraw-page'; buffer: ArrayBuffer; ops: readonly PageOp[]; rotation: number; dpiX: number; dpiY: number }
   | { id: number; type: 'thumbnail'; page: number; revision: number; ops: readonly PageOp[] }
   /** Measures the skew of a page with `ops` applied. */
   | { id: number; type: 'skew'; page: number; revision: number; ops: readonly PageOp[] }
@@ -44,7 +49,7 @@ export type WorkerRequest =
   /**
    * Writes `pages`, in this order, to one PDF or multi-page TIFF file.
    * A TIFF copies the original strips of a page with no edits and no rotation, and re-encodes the rest.
-   * While it runs the worker posts `export-progress` for the same id; that does not finish the job.
+   * While it runs the worker posts `export-progress` and `export-timing` for the same id; neither finishes the job.
    */
   | { id: number; type: 'export'; pages: readonly ExportPage[]; format: ExportFormat }
 
@@ -60,6 +65,25 @@ export type WorkerResponse =
   | { id: number; type: 'skew'; page: number; angle: number }
   | { id: number; type: 'regions-hit'; page: number; hits: string[] }
   | { id: number; type: 'exported'; blob: Blob }
-  /** `done` is the page being written, 1-based. Sent before that page's work, and does not finish the export. */
+  /** `done` is how many pages are finished, in output order. Does not finish the export. */
   | { id: number; type: 'export-progress'; done: number; total: number }
+  /** A page redrawn by a helper worker. `data` is the compressed samples. Does not finish an export. */
+  | {
+      id: number
+      type: 'redrawn'
+      width: number
+      height: number
+      dpiX: number
+      dpiY: number
+      gray: boolean
+      data: ArrayBuffer
+      ms: number
+      decode: number
+      edits: number
+      orient: number
+      pixels: number
+      encode: number
+    }
+  /** One line per page, then a summary. Does not finish the export. */
+  | { id: number; type: 'export-timing'; message: string }
   | { id: number; type: 'error'; message: string }

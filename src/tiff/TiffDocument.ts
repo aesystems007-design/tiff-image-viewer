@@ -91,6 +91,10 @@ export class TiffDocument {
         pending.onProgress?.(response.done, response.total)
         return
       }
+      if (response.type === 'export-timing') {
+        console.info(response.message)
+        return
+      }
       this.pending.delete(response.id)
       const wasThumbnail = pending.thumbnail === true
       if (response.type === 'error') pending.reject(new Error(response.message))
@@ -242,9 +246,12 @@ export class TiffDocument {
     format: ExportFormat,
     onProgress?: (done: number, total: number) => void,
   ): Promise<Blob> {
+    const started = performance.now()
     const plain = pages.map((page) => ({ ...page, ops: plainOps(page.ops) }))
     const response = await this.send({ type: 'export', pages: plain, format }, [], PRIORITY_RENDER, onProgress)
     if (response.type !== 'exported') throw new Error('Unexpected response from TIFF decoder.')
+    const waited = Math.round((performance.now() - started) * 10) / 10
+    console.info(`[tiff export] received ${format} (${response.blob.size} bytes) after ${waited}ms`)
     return response.blob
   }
 

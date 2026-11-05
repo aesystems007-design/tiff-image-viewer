@@ -31,8 +31,9 @@ let pages: Page[] = []
  */
 let pageRevisions: Page[][] = []
 
-function post(message: WorkerResponse) {
-  self.postMessage(message)
+function post(message: WorkerResponse, transfer?: Transferable[]) {
+  const scope = self as unknown as { postMessage(message: WorkerResponse, transfer: Transferable[]): void }
+  scope.postMessage(message, transfer ?? [])
 }
 
 // NewSubfileType (tag 254) bit 0 marks reduced-resolution copies (thumbnails, pyramid levels).
@@ -144,11 +145,27 @@ function getDecodedPage(pageIndex: number, revision: number): OffscreenCanvas {
   return canvas
 }
 
-/** The page with its edits applied. Never modifies the cached decoded page. */
-async function editedPage(pageIndex: number, revision: number, ops: readonly PageOp[]): Promise<OffscreenCanvas> {
-  const base = getDecodedPage(pageIndex, revision)
-  if (ops.length === 0) return base
+/** Milliseconds since `mark`, to 0.1ms. */
+function since(mark: number): number {
+  return Math.round((performance.now() - mark) * 10) / 10
+}
 
+/** The page with its edits applied. Never modifies the cached decoded page. */
+async function editedPage(
+  pageIndex: number,
+  revision: number,
+  ops: readonly PageOp[],
+  times?: { decode: number; edits: number },
+): Promise<OffscreenCanvas> {
+  const decodedAt = performance.now()
+  const base = getDecodedPage(pageIndex, revision)
+  if (times) times.decode = since(decodedAt)
+  if (ops.length === 0) {
+    if (times) times.edits = 0
+    return base
+  }
+
+  const editsAt = performance.now()
   let canvas = toPaper(base, base.width, base.height)
   let pixelOps: PixelOp[] = []
   const flush = () => {
@@ -180,6 +197,7 @@ async function editedPage(pageIndex: number, revision: number, ops: readonly Pag
     }
   }
   flush()
+  if (times) times.edits = since(editsAt)
   return canvas
 }
 
@@ -418,10 +436,20 @@ async function inspectRegions(
  * A straight page is returned as-is. `getImageData` does not change the canvas, and `editedPage`
  * returns the decode cache only when there are no ops, so that cache stays intact.
  */
-async function orientedPage(pageIndex: number, revision: number, ops: readonly PageOp[], rotation: number): Promise<OffscreenCanvas> {
-  const page = await editedPage(pageIndex, revision, ops)
+async function orientedPage(
+  pageIndex: number,
+  revision: number,
+  ops: readonly PageOp[],
+  rotation: number,
+  times?: { decode: number; edits: number; orient: number },
+): Promise<OffscreenCanvas> {
+  const page = await editedPage(pageIndex, revision, ops, times)
   const degrees = ((rotation % 360) + 360) % 360
-  if (degrees === 0) return page
+  if (degrees === 0) {
+    if (times) times.orient = 0
+    return page
+  }
+  const orientAt = performance.now()
   const sideways = degrees % 180 !== 0
   const canvas = new OffscreenCanvas(sideways ? page.height : page.width, sideways ? page.width : page.height)
   const ctx = context(canvas)
@@ -430,54 +458,280 @@ async function orientedPage(pageIndex: number, revision: number, ops: readonly P
   ctx.translate(canvas.width / 2, canvas.height / 2)
   ctx.rotate((degrees * Math.PI) / 180)
   ctx.drawImage(page, -page.width / 2, -page.height / 2)
+  if (times) times.orient = since(orientAt)
   return canvas
+}
+
+/** At most three redraws at once: this worker plus two helpers. Leaves a core for the page when there are fewer. */
+function helperCount(jobs: number): number {
+  if (jobs < 2) return 0
+  const cores = navigator.hardwareConcurrency || 3
+  return Math.max(0, Math.min(2, jobs - 1, cores - 1))
+}
+
+interface TimedRedraw {
+  page: EncodedPage
+  ms: number
+  decode: number
+  edits: number
+  orient: number
+  pixels: number
+  encode: number
+}
+
+interface RedrawJob {
+  index: number
+  spec: ExportPage
+  /** One-page TIFF of the original strips, for a helper. Null when the strips cannot be copied out. */
+  slice: ArrayBuffer | null
+  missed: boolean
+}
+
+/** One-page TIFF of `stored`, or null when those strips cannot be copied safely. */
+async function pageSlice(stored: Page | undefined): Promise<ArrayBuffer | null> {
+  if (!stored || stored.ifdOffset < 0) return null
+  const copied = copyOriginalPage(stored.source.buffer, stored.ifdOffset, 0, 1)
+  if (!copied) return null
+  return tiffFile([copied]).arrayBuffer()
+}
+
+/**
+ * Another copy of this worker. Built with `new Function` so the bundler does not treat it as a nested
+ * worker of this file (that circular bundle never finishes loading).
+ */
+function spawnRedrawWorker(): Worker {
+  const spawn = new Function('url', 'return new Worker(url, { type: "module" })') as (url: string) => Worker
+  return spawn(self.location.href)
+}
+
+/**
+ * Extra workers that redraw one page each. Each is given that page's strips, not the whole document.
+ * Stopped when the export finishes.
+ */
+class RedrawHelpers {
+  private readonly workers: Worker[] = []
+  private readonly pending = new Map<number, { resolve: (page: TimedRedraw) => void; reject: (error: Error) => void }>()
+  private nextId = 1
+  readonly count: number
+
+  constructor(count: number) {
+    this.count = count
+    for (let i = 0; i < count; i++) {
+      const worker = spawnRedrawWorker()
+      worker.addEventListener('message', (event: MessageEvent<WorkerResponse>) => {
+        const response = event.data
+        const waiting = this.pending.get(response.id)
+        if (!waiting) return
+        this.pending.delete(response.id)
+        if (response.type === 'redrawn') waiting.resolve(timedFromRedrawn(response))
+        else if (response.type === 'error') waiting.reject(new Error(response.message))
+        else waiting.reject(new Error('Unexpected response from a redraw worker.'))
+      })
+      worker.addEventListener('error', () => {
+        for (const waiting of this.pending.values()) waiting.reject(new Error('A redraw worker stopped.'))
+        this.pending.clear()
+      })
+      this.workers.push(worker)
+    }
+  }
+
+  redraw(index: number, buffer: ArrayBuffer, spec: ExportPage): Promise<TimedRedraw> {
+    const worker = this.workers[index]
+    const id = this.nextId++
+    const result = new Promise<TimedRedraw>((resolve, reject) => this.pending.set(id, { resolve, reject }))
+    worker.postMessage(
+      { id, type: 'redraw-page', buffer, ops: spec.ops, rotation: spec.rotation, dpiX: spec.dpiX, dpiY: spec.dpiY },
+      [buffer],
+    )
+    return result
+  }
+
+  stop() {
+    for (const worker of this.workers) worker.terminate()
+    this.workers.length = 0
+    for (const waiting of this.pending.values()) waiting.reject(new Error('Export stopped.'))
+    this.pending.clear()
+  }
+}
+
+function timedFromRedrawn(response: Extract<WorkerResponse, { type: 'redrawn' }>): TimedRedraw {
+  return {
+    page: {
+      width: response.width,
+      height: response.height,
+      dpiX: response.dpiX,
+      dpiY: response.dpiY,
+      gray: response.gray,
+      data: new Uint8Array(response.data),
+    },
+    ms: response.ms,
+    decode: response.decode,
+    edits: response.edits,
+    orient: response.orient,
+    pixels: response.pixels,
+    encode: response.encode,
+  }
 }
 
 /**
  * Writes the pages in order. A TIFF copies the original compressed strips of a page that has no edits
  * and no rotation (deleted pages are simply absent; a new order is those strips in the new order).
- * Anything else is redrawn. A PDF cannot reuse TIFF strips, so every page of one is redrawn.
- * `report` runs at the start of each page, before the slow work.
+ * Anything else is redrawn, up to three pages at a time. A PDF cannot reuse TIFF strips, so every page
+ * of one is redrawn. `report` is how many pages are finished, in output order.
  */
 async function exportPages(
   list: readonly ExportPage[],
   format: ExportFormat,
   report: (done: number, total: number) => void,
+  note: (message: string) => void,
 ): Promise<Blob> {
-  if (format === 'pdf') {
-    const encoded: EncodedPage[] = []
-    for (let i = 0; i < list.length; i++) {
-      report(i + 1, list.length)
-      await Promise.resolve()
-      encoded.push(await encodeExportPage(list[i]))
+  const started = performance.now()
+  let copyCount = 0
+  let copyMs = 0
+  let redrawCount = 0
+  let redrawMs = 0
+  let slowest = ''
+  let slowestMs = -1
+  const timePage = (index: number, path: 'copy' | 'redraw', ms: number, detail: string) => {
+    if (path === 'copy') {
+      copyCount++
+      copyMs += ms
+    } else {
+      redrawCount++
+      redrawMs += ms
     }
-    return pdfFile(encoded)
+    note(`[tiff export] ${format} page ${index + 1}/${list.length} ${path} ${ms}ms${detail}`)
+    if (ms > slowestMs) {
+      slowestMs = ms
+      slowest = `page ${index + 1} ${path} ${ms}ms`
+    }
   }
 
-  const out: TiffPage[] = []
+  const copied: (TiffPage | null)[] = new Array(list.length).fill(null)
+  const redrawn: (EncodedPage | undefined)[] = new Array(list.length)
+  const jobs: RedrawJob[] = []
+  const ready = new Array<boolean>(list.length).fill(false)
+  let prefix = 0
+  const markReady = (index: number) => {
+    ready[index] = true
+    const before = prefix
+    while (prefix < list.length && ready[prefix]) prefix++
+    if (prefix > before && list.length > 1) report(prefix, list.length)
+  }
+
   for (let i = 0; i < list.length; i++) {
-    report(i + 1, list.length)
-    await Promise.resolve()
     const spec = list[i]
     const rotation = ((spec.rotation % 360) + 360) % 360
-    const stored = pageRevisions[spec.page]?.[spec.revision ?? 0]
-    if (rotation === 0 && spec.ops.length === 0 && stored && stored.ifdOffset >= 0) {
+    const stored = pageRevisions[spec.page]?.[spec.revision ?? 0] ?? pageRevisions[spec.page]?.[0]
+    if (format === 'tiff' && rotation === 0 && spec.ops.length === 0 && stored && stored.ifdOffset >= 0) {
+      const copyAt = performance.now()
       const original = copyOriginalPage(stored.source.buffer, stored.ifdOffset, i, list.length)
       if (original) {
-        out.push(original)
+        copied[i] = original
+        timePage(i, 'copy', since(copyAt), ` file ${spec.page}`)
+        markReady(i)
         continue
       }
     }
-    out.push(encodedTiffPage(await encodeExportPage(spec), i, list.length))
+    jobs.push({
+      index: i,
+      spec,
+      slice: await pageSlice(stored),
+      missed: format === 'tiff' && rotation === 0 && spec.ops.length === 0,
+    })
   }
-  return tiffFile(out)
+
+  const pooled = jobs.filter((job) => job.slice)
+  const helpers = new RedrawHelpers(helperCount(pooled.length))
+  let poolCursor = 0
+  let localCursor = 0
+  const localJobs = jobs.filter((job) => !job.slice)
+  const takePooled = () => (poolCursor < pooled.length ? pooled[poolCursor++] : null)
+  const takeLocal = () => (localCursor < localJobs.length ? localJobs[localCursor++] : null)
+
+  const finish = (job: RedrawJob, timed: TimedRedraw, worker: number | null) => {
+    redrawn[job.index] = timed.page
+    timePage(job.index, 'redraw', timed.ms, redrawDetail(job, timed, worker))
+    markReady(job.index)
+  }
+
+  const localLoop = async () => {
+    for (;;) {
+      const job = takeLocal() ?? takePooled()
+      if (!job) return
+      finish(job, await timeRedraw(job.spec), helpers.count > 0 ? 0 : null)
+    }
+  }
+  const helperLoop = async (index: number) => {
+    for (;;) {
+      const job = takePooled()
+      if (!job?.slice) return
+      finish(job, await helpers.redraw(index, job.slice, job.spec), index + 1)
+    }
+  }
+
+  try {
+    await Promise.all([localLoop(), ...Array.from({ length: helpers.count }, (_, index) => helperLoop(index))])
+  } finally {
+    helpers.stop()
+  }
+
+  const assembleAt = performance.now()
+  const blob =
+    format === 'pdf'
+      ? pdfFile(list.map((_, i) => redrawn[i] ?? missingPage(i)))
+      : tiffFile(list.map((_, i) => copied[i] ?? encodedTiffPage(redrawn[i] ?? missingPage(i), i, list.length)))
+  const workers = redrawCount === 0 ? 0 : helpers.count + 1
+  note(exportSummary(format, list.length, since(started), copyCount, copyMs, redrawCount, redrawMs, since(assembleAt), slowest, workers))
+  return blob
 }
 
-async function encodeExportPage(spec: ExportPage): Promise<EncodedPage> {
-  const canvas = await orientedPage(spec.page, spec.revision ?? 0, spec.ops, spec.rotation)
+function missingPage(index: number): never {
+  throw new Error(`Page ${index + 1} was not written.`)
+}
+
+function redrawDetail(job: RedrawJob, timed: TimedRedraw, worker: number | null): string {
+  const rot = ((job.spec.rotation % 360) + 360) % 360
+  const where = worker === null ? '' : ` w${worker}`
+  const miss = job.missed ? ' copy missed' : ''
+  return (
+    `${miss} file ${job.spec.page} decode ${timed.decode} edits ${timed.edits} orient ${timed.orient}` +
+    ` pixels ${timed.pixels} encode ${timed.encode} ${timed.page.width}x${timed.page.height}` +
+    ` ops ${job.spec.ops.length} rot ${rot}${where}`
+  )
+}
+
+function exportSummary(
+  format: ExportFormat,
+  pages: number,
+  totalMs: number,
+  copyCount: number,
+  copyMs: number,
+  redrawCount: number,
+  redrawMs: number,
+  assembleMs: number,
+  slowest: string,
+  workers: number,
+): string {
+  const copy = `${copyCount} copied in ${Math.round(copyMs * 10) / 10}ms`
+  const pool = workers > 1 ? ` on ${workers} workers` : ''
+  const redraw = `${redrawCount} redrawn (sum ${Math.round(redrawMs * 10) / 10}ms)${pool}`
+  const slow = slowest ? `, slowest ${slowest}` : ''
+  return `[tiff export] ${format} ${pages} pages in ${totalMs}ms — ${copy}, ${redraw}, assemble ${assembleMs}ms${slow}`
+}
+
+/** Redraws one page and times decode, edits, rotation, the pixel read, and compression. */
+async function timeRedraw(spec: ExportPage): Promise<TimedRedraw> {
+  const started = performance.now()
+  const times = { decode: 0, edits: 0, orient: 0 }
+  const canvas = await orientedPage(spec.page, spec.revision ?? 0, spec.ops, spec.rotation, times)
+  const pixelsAt = performance.now()
   const image = context(canvas).getImageData(0, 0, canvas.width, canvas.height)
+  const pixels = since(pixelsAt)
   const sideways = (((spec.rotation % 360) + 360) % 360) % 180 !== 0
-  return encodePage(image, sideways ? spec.dpiY : spec.dpiX, sideways ? spec.dpiX : spec.dpiY)
+  const encodeAt = performance.now()
+  const page = await encodePage(image, sideways ? spec.dpiY : spec.dpiX, sideways ? spec.dpiX : spec.dpiY)
+  return { page, ms: since(started), decode: times.decode, edits: times.edits, orient: times.orient, pixels, encode: since(encodeAt) }
 }
 
 function context(canvas: OffscreenCanvas): OffscreenCanvasRenderingContext2D {
@@ -613,13 +867,61 @@ self.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
           blob: await thumbnailBlob(request.page, request.revision, request.ops),
         })
         break
+      case 'redraw-page': {
+        const previousPages = pages
+        const previousRevisions = pageRevisions
+        const cached = [...decoded.entries()]
+        try {
+          open(request.buffer)
+          if (pages.length !== 1) throw new Error(`Expected 1 page, got ${pages.length} pages.`)
+          const timed = await timeRedraw({
+            page: 0,
+            revision: 0,
+            ops: request.ops,
+            rotation: request.rotation,
+            dpiX: request.dpiX,
+            dpiY: request.dpiY,
+          })
+          const bytes = timed.page.data
+          const data = new ArrayBuffer(bytes.byteLength)
+          new Uint8Array(data).set(bytes)
+          post(
+            {
+              id: request.id,
+              type: 'redrawn',
+              width: timed.page.width,
+              height: timed.page.height,
+              dpiX: timed.page.dpiX,
+              dpiY: timed.page.dpiY,
+              gray: timed.page.gray,
+              data,
+              ms: timed.ms,
+              decode: timed.decode,
+              edits: timed.edits,
+              orient: timed.orient,
+              pixels: timed.pixels,
+              encode: timed.encode,
+            },
+            [data],
+          )
+        } finally {
+          pages = previousPages
+          pageRevisions = previousRevisions
+          decoded.clear()
+          for (const [key, canvas] of cached) decoded.set(key, canvas)
+        }
+        break
+      }
       case 'export':
         post({
           id: request.id,
           type: 'exported',
-          blob: await exportPages(request.pages, request.format, (done, total) => {
-            post({ id: request.id, type: 'export-progress', done, total })
-          }),
+          blob: await exportPages(
+            request.pages,
+            request.format,
+            (done, total) => post({ id: request.id, type: 'export-progress', done, total }),
+            (message) => post({ id: request.id, type: 'export-timing', message }),
+          ),
         })
         break
       case 'skew':
