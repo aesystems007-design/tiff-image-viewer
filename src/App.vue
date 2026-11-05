@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, trigge
 import { annotationOp, type Annotation } from './annotations/annotation'
 import { embedRichTextImages, rasterizeAnnotationBox } from './annotations/rasterize'
 import { isImageRun, loadInlineImage, textWithInlineImage, type ImageRun, type RichText } from './annotations/richText'
-import { asTiff } from './api/asTiff'
+import { asTiff, fileKind } from './api/asTiff'
 import { fetchDocument, saveDocument } from './api/documentApi'
 import AnnotationEditor from './components/AnnotationEditor.vue'
 import AppIcon from './components/AppIcon.vue'
@@ -29,6 +29,7 @@ import {
   type UneditableAnnotation,
 } from './host/uneditableAnnotation'
 import { initialDocumentId, isHosted, listenToHost, notifyHost, type BurnedAnnotation, type HostCommand } from './host/hostBridge'
+import { hostPageTools, pageToolBytes, pageToolFunction, pageToolFunctions, setHostPageTools, syncPageToolFunctions, type PageToolName } from './host/pageTools'
 import { setIconFont, setIcons } from './icons/registry'
 import { setToolbarButtons, toolbarButtonShown } from './host/toolbarButtons'
 import { canScan, setScanLicense } from './scan/license'
@@ -133,7 +134,11 @@ const canDeletePages = computed(() => selection.count.value < visiblePages.value
 const canMoveUp = computed(() => movePagesWithin(visiblePages.value, selection.selected.value, -1) !== null)
 const canMoveDown = computed(() => movePagesWithin(visiblePages.value, selection.selected.value, 1) !== null)
 /** Page sizes with edits applied (indexed by file page). */
-const pageInfos = computed(() => (doc.value?.pages ?? []).map((info, i) => editedPageInfo(info, opsOf(i))))
+const pageInfos = computed(() => {
+  const current = doc.value
+  if (!current) return []
+  return current.pages.map((_, i) => editedPageInfo(current.revisionInfo(i, edits.revisions.value[i] ?? 0), opsOf(i)))
+})
 const pageInfo = computed(() => pageInfos.value[page.value] ?? null)
 /**
  * Size of the page on screen for the status bar. A 90° or 270° rotation swaps the sides
@@ -242,7 +247,7 @@ async function scanImageWarnings() {
     const regions = pageGuideList.map((guide, i) => ({ id: String(i), rect: { ...guide.rect } }))
     let hits: string[]
     try {
-      hits = await current.inspectRegions(pageIndex, opsOf(pageIndex), regions)
+      hits = await current.inspectRegions(pageIndex, opsOf(pageIndex), regions, edits.revisions.value[pageIndex] ?? 0)
     } catch {
       if (doc.value !== current || token !== warningToken) return
       continue
@@ -266,7 +271,7 @@ async function scanImageWarnings() {
 }
 
 watch(
-  [() => doc.value?.id, margins, guidesByPage, () => edits.ops.value, visiblePages],
+  [() => doc.value?.id, margins, guidesByPage, () => edits.ops.value, () => edits.revisions.value, visiblePages],
   () => {
     if (!doc.value || !margins.value) {
       window.clearTimeout(warningTimer)
@@ -597,10 +602,13 @@ async function applyEdits() {
     saving.value = true
     showNotice('Saving…')
     try {
-      const tiff = await current.exportFile(exportPages(), 'tiff')
+      const tiff = await current.exportFile(exportPages(), 'tiff', (done, total) => {
+        if (doc.value === current && total > 1) showNotice(`Saving page ${done} of ${total}…`)
+      })
       if (doc.value !== current) return
       if (isHosted()) {
         savingId.value = id
+        showNotice('Saving…')
         notifyHost({ type: 'save-requested', id, name: current.name, buffer: await tiff.arrayBuffer() })
         // Host answers with save-acked / save-failed; keep Saving… until then.
         return
@@ -732,9 +740,9 @@ function cancelEdits() {
 
 // Re-render the current page in place when its edits change (new edit, undo, cancel).
 watch(
-  () => [page.value, opsKey(opsOf(page.value))] as const,
-  ([index, key], [previousIndex, previousKey]) => {
-    if (index === previousIndex && key !== previousKey) showPage(index)
+  () => [page.value, edits.revisions.value[page.value] ?? 0, opsKey(opsOf(page.value))] as const,
+  ([index, revision, key], [previousIndex, previousRevision, previousKey]) => {
+    if (index === previousIndex && (key !== previousKey || revision !== previousRevision)) showPage(index)
   },
 )
 
@@ -802,6 +810,7 @@ function clearHostImage() {
 
 /** Dispose the open document and leave the viewer empty (Loading already off). */
 function resetViewerDocument() {
+  dropPageTool()
   serverLoadToken++
   loadToken++
   hostLoading.value = false
@@ -865,6 +874,7 @@ async function openDocument(
   } = {},
 ): Promise<boolean> {
   if (!options.skipConfirm && !canReplaceDocument()) return false
+  dropPageTool()
   const token = ++loadToken
   busy.value = true
   error.value = null
@@ -921,14 +931,15 @@ async function showPage(index: number) {
   error.value = null
   try {
     const ops = opsOf(index)
-    const { width, height } = editedPageInfo(current.pages[index], ops)
-    const url = await current.getPageUrl(index, ops)
+    const revision = edits.revisions.value[index] ?? 0
+    const { width, height } = editedPageInfo(current.revisionInfo(index, revision), ops)
+    const url = await current.getPageUrl(index, ops, revision)
     if (token !== loadToken) return
     shownPage.value = index
-    shownPageKey.value = `${current.id}:${index}:${width}x${height}`
+    shownPageKey.value = `${current.id}:${index}:${revision}:${width}x${height}`
     pageUrl.value = url
     const next = visiblePages.value[visiblePages.value.indexOf(index) + 1]
-    if (next !== undefined) current.getPageUrl(next, opsOf(next)).catch(() => {})
+    if (next !== undefined) current.getPageUrl(next, opsOf(next), edits.revisions.value[next] ?? 0).catch(() => {})
   } catch (err) {
     if (token === loadToken) error.value = `Could not render page ${index + 1}: ${err instanceof Error ? err.message : String(err)}`
   } finally {
@@ -1034,7 +1045,9 @@ async function deskewPages(all: boolean) {
   deskewing.value = true
   showNotice(targets.length > 1 ? `Measuring skew of ${targets.length} pages…` : 'Measuring skew…')
   try {
-    const angles = await Promise.all(targets.map((index) => current.measureSkew(index, opsOf(index))))
+    const angles = await Promise.all(
+      targets.map((index) => current.measureSkew(index, opsOf(index), edits.revisions.value[index] ?? 0)),
+    )
     if (doc.value !== current) return
     const deskews = new Map<number, PageOp[]>()
     targets.forEach((index, i) => {
@@ -1052,6 +1065,112 @@ async function deskewPages(all: boolean) {
   }
 }
 
+const externalDeskew = computed(() => hostPageTools.deskew || pageToolFunctions.deskew)
+const externalDespeckle = computed(() => hostPageTools.despeckle || pageToolFunctions.despeckle)
+
+let toolGeneration = 0
+let nextToolRequest = 1
+let toolRequest: {
+  id: number
+  resolve: (buffer: ArrayBuffer | null) => void
+  reject: (error: Error) => void
+} | null = null
+
+/** Drops a company's deskew or despeckle that is still waiting, so a new document is not stuck on it. */
+function dropPageTool() {
+  toolGeneration++
+  const pending = toolRequest
+  toolRequest = null
+  pending?.reject(new Error('The document changed.'))
+  deskewing.value = false
+}
+
+function onDeskewPages(all: boolean) {
+  if (pageToolFunction('deskew') || hostPageTools.deskew) void runCompanyPageTool('deskew', all)
+  else void deskewPages(all)
+}
+
+function onDespecklePages(all: boolean) {
+  if (pageToolFunction('despeckle') || hostPageTools.despeckle) void runCompanyPageTool('despeckle', all)
+  else despecklePages(all)
+}
+
+/**
+ * Asks the company to deskew or despeckle the selected pages (`all` = every visible page). The TIFF they
+ * return replaces those pages. Pending edits are drawn into the TIFF first, then cleared, because the new
+ * image already includes them. Rotation is left as it is.
+ */
+async function runCompanyPageTool(tool: PageToolName, all: boolean) {
+  const current = doc.value
+  if (!current || deskewing.value) return
+  const targets = (all ? visiblePages.value : visiblePages.value.filter((index) => selection.selected.value.has(index))).slice()
+  if (targets.length === 0) return
+  const generation = ++toolGeneration
+  const fn = pageToolFunction(tool)
+  const label = tool === 'deskew' ? 'Deskewing' : 'Despeckling'
+  const done = tool === 'deskew' ? 'Deskewed' : 'Despeckled'
+  deskewing.value = true
+  showNotice(targets.length > 1 ? `${label} ${targets.length} pages…` : `${label}…`)
+  try {
+    const pageIndexes = targets.map((index) => visiblePages.value.indexOf(index))
+    const tiff = await current.exportFile(
+      targets.map((index) => ({
+        page: index,
+        revision: edits.revisions.value[index] ?? 0,
+        ops: opsOf(index),
+        rotation: 0,
+        ...pageResolution(pageInfos.value[index]),
+      })),
+      'tiff',
+      (pageDone, total) => {
+        if (doc.value === current && total > 1) showNotice(`${label} page ${pageDone} of ${total}…`)
+      },
+    )
+    if (doc.value !== current || generation !== toolGeneration) return
+    const buffer = await tiff.arrayBuffer()
+    const result = fn
+      ? await pageToolBytes(await fn({ buffer, scope: all ? 'all' : 'page', pageIndexes }))
+      : await askHostPageTool(tool, all ? 'all' : 'page', pageIndexes, buffer)
+    if (doc.value !== current || generation !== toolGeneration) return
+    if (!result) {
+      showNotice(tool === 'deskew' ? 'No skew found' : 'Despeckle made no change', NOTICE_MS)
+      return
+    }
+    if ((await fileKind(new Blob([result]))) !== 'tiff') throw new Error('The result must be a TIFF.')
+    const adopted = await current.replacePages(result, targets)
+    if (doc.value !== current || generation !== toolGeneration) return
+    edits.setPageRevisions(new Map(adopted.map((item) => [item.page, item.revision])))
+    showNotice(adopted.length === 1 ? `${done} 1 page` : `${done} ${adopted.length} pages`, NOTICE_MS)
+  } catch (err) {
+    if (generation !== toolGeneration || doc.value !== current) return
+    showNotice(null)
+    error.value = `Could not ${tool}: ${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    if (generation === toolGeneration) deskewing.value = false
+  }
+}
+
+function askHostPageTool(
+  tool: PageToolName,
+  scope: 'page' | 'all',
+  pageIndexes: number[],
+  buffer: ArrayBuffer,
+): Promise<ArrayBuffer | null> {
+  const id = nextToolRequest++
+  return new Promise((resolve, reject) => {
+    toolRequest = { id, resolve, reject }
+    notifyHost({ type: 'page-tool-requested', requestId: id, tool, scope, pageIndexes, buffer })
+  })
+}
+
+function onPageToolResult(requestId: number, buffer: ArrayBuffer | null, message: string | null) {
+  if (!toolRequest || toolRequest.id !== requestId) return
+  const pending = toolRequest
+  toolRequest = null
+  if (message) pending.reject(new Error(message))
+  else pending.resolve(buffer)
+}
+
 const downloadDialogOpen = ref(false)
 const downloading = ref(false)
 
@@ -1065,6 +1184,7 @@ const downloadName = computed(() => (doc.value?.name ?? 'document').replace(/\.[
 function exportPages(): ExportPage[] {
   return visiblePages.value.map((index) => ({
     page: index,
+    revision: edits.revisions.value[index] ?? 0,
     ops: opsOf(index),
     rotation: edits.rotations.value[index] ?? 0,
     ...pageResolution(pageInfos.value[index]),
@@ -1078,7 +1198,9 @@ async function downloadDocument(fileName: string, format: ExportFormat) {
   downloading.value = true
   showNotice(`Preparing ${fileName}…`)
   try {
-    const blob = await current.exportFile(exportPages(), format)
+    const blob = await current.exportFile(exportPages(), format, (done, total) => {
+      if (doc.value === current && total > 1) showNotice(`Preparing page ${done} of ${total}…`)
+    })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -1224,7 +1346,7 @@ async function print() {
   busy.value = true
   error.value = null
   try {
-    await printDocument(current, visiblePages.value, edits.rotations.value, edits.ops.value)
+    await printDocument(current, visiblePages.value, edits.rotations.value, edits.ops.value, edits.revisions.value)
   } catch (err) {
     error.value = `Could not print: ${err instanceof Error ? err.message : String(err)}`
   } finally {
@@ -1350,6 +1472,12 @@ onMounted(() => {
       case 'set-allowed-page-size':
         onSetAllowedPageSize(command.allowedPageSize)
         break
+      case 'set-page-tools':
+        setHostPageTools(command)
+        break
+      case 'page-tool-result':
+        onPageToolResult(command.requestId, command.buffer, command.message)
+        break
     }
   })
   // Standalone: `?id=` still self-fetches. A host should open with `open-image` instead.
@@ -1374,6 +1502,7 @@ onBeforeUnmount(() => {
     @drop.prevent="onDrop"
   >
     <ViewerToolbar
+      @pointerenter="syncPageToolFunctions"
       v-model:brightness="brightness"
       v-model:contrast="contrast"
       :page="pagePosition"
@@ -1395,6 +1524,8 @@ onBeforeUnmount(() => {
       :can-move-down="canMoveDown"
       :has-margins="!!margins"
       :deskewing="deskewing"
+      :external-deskew="externalDeskew"
+      :external-despeckle="externalDespeckle"
       :downloading="downloading"
       :scanning="scanning"
       :can-scan="canScan"
@@ -1405,7 +1536,7 @@ onBeforeUnmount(() => {
       @move-pages="moveSelectedPages"
       @toggle-erase="toggleEraseMode"
       @toggle-reposition="toggleRepositionMode"
-      @despeckle-pages="despecklePages"
+      @despeckle-pages="onDespecklePages"
       @toggle-select-area="toggleSelectAreaMode"
       @toggle-thumbnails="thumbnailsVisible = !thumbnailsVisible"
       @undo="revertEdits(edits.undo)"
@@ -1417,7 +1548,7 @@ onBeforeUnmount(() => {
       @cancel="cancelEdits"
       @convert-pages="convertPages"
       @white-out-margins="whiteOutMargins"
-      @deskew-pages="deskewPages"
+      @deskew-pages="onDeskewPages"
       @fit="fit"
       @toggle-fullscreen="toggleFullscreen"
       @go-to-page="goToPosition"
@@ -1437,6 +1568,7 @@ onBeforeUnmount(() => {
         :pages="visiblePages"
         :rotations="edits.rotations.value"
         :ops="edits.ops.value"
+        :revisions="edits.revisions.value"
         :page-infos="pageInfos"
         :guides="guidesByPage"
         :warning-pages="warningPages"

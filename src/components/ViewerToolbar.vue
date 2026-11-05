@@ -34,8 +34,12 @@ const props = defineProps<{
   canMoveDown: boolean
   /** Margin rules are loaded for the document, so there is something to white out. */
   hasMargins: boolean
-  /** A deskew is measuring pages. */
+  /** A deskew is measuring pages, or a company's deskew / despeckle is running. */
   deskewing: boolean
+  /** Deskew is the company's function, not the built-in. */
+  externalDeskew?: boolean
+  /** Despeckle is the company's function, not the built-in. */
+  externalDespeckle?: boolean
   /** A download file is being written. */
   downloading: boolean
   /** A scan is in progress (Dynamsoft / scanner dialogs open). */
@@ -262,16 +266,16 @@ const fitModes: { mode: FitMode; icon: 'fit-page' | 'fit-width' | 'fit-actual'; 
       <ToolButton
         v-if="shown('despeckle')"
         icon="despeckle"
-        :title="`Despeckle ${selectionLabel} (each click removes bigger specks)`"
-        :disabled="!canEdit"
+        :title="externalDespeckle ? `Despeckle ${selectionLabel}` : `Despeckle ${selectionLabel} (each click removes bigger specks)`"
+        :disabled="!canEdit || deskewing"
         @click="emit('despeckle-pages', false)"
       />
       <ToolButton
         v-if="shown('despeckle-all')"
         icon="despeckle"
-        title="Despeckle all pages (each click removes bigger specks)"
+        :title="externalDespeckle ? 'Despeckle all pages' : 'Despeckle all pages (each click removes bigger specks)'"
         large
-        :disabled="!canEdit"
+        :disabled="!canEdit || deskewing"
         @click="emit('despeckle-pages', true)"
       />
       <ToolButton

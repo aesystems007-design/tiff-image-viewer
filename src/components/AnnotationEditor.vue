@@ -1,18 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { annotationImageSource } from '../annotations/htmlContent'
-import {
-  DEFAULT_TEXT_COLOR,
-  DEFAULT_TEXT_SIZE,
-  FONT_FAMILY,
-  isEmptyText,
-  loadInlineImage,
-  richTextFromElement,
-  richTextToHtml,
-  TEXT_SIZES,
-  type ImageRun,
-  type RichText,
-} from '../annotations/richText'
+import { onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import type { Editor } from 'hugerte'
+import { isEmptyText, richTextFromElement, richTextToHtml, type RichText } from '../annotations/richText'
 import AppIcon from './AppIcon.vue'
 
 const props = defineProps<{
@@ -27,266 +16,89 @@ const emit = defineEmits<{
   (e: 'remove'): void
 }>()
 
-const file = ref<HTMLInputElement>()
+const mount = ref<HTMLElement>()
+const editor = shallowRef<Editor | null>(null)
+const ready = ref(false)
+const failed = ref(false)
+const empty = ref(true)
+let destroyed = false
 
-const editor = ref<HTMLDivElement>()
-const empty = ref(isEmptyText(props.text))
-/** Formatting at the caret, shown as active buttons / current size and color. */
-const state = reactive({
-  bold: false,
-  italic: false,
-  underline: false,
-  align: 'left',
-  size: DEFAULT_TEXT_SIZE,
-  color: DEFAULT_TEXT_COLOR,
-})
-let savedRange: Range | null = null
-
-function editorRange(): Range | null {
-  const selection = window.getSelection()
-  if (!selection || selection.rangeCount === 0 || !editor.value) return null
-  const range = selection.getRangeAt(0)
-  return editor.value.contains(range.commonAncestorContainer) ? range : null
-}
-
-function onSelectionChange() {
-  const range = editorRange()
-  if (!range) return
-  savedRange = range.cloneRange()
-  state.bold = document.queryCommandState('bold')
-  state.italic = document.queryCommandState('italic')
-  state.underline = document.queryCommandState('underline')
-  state.align = document.queryCommandState('justifyCenter') ? 'center' : document.queryCommandState('justifyRight') ? 'right' : 'left'
-  const node = range.startContainer
-  const element = node instanceof Element ? node : node.parentElement
-  if (element) {
-    const style = getComputedStyle(element)
-    state.size = Math.round(Number.parseFloat(style.fontSize) * 0.75 * 2) / 2
-    const rgb = style.color.match(/\d+/g)
-    if (rgb) state.color = `#${rgb.slice(0, 3).map((c) => Number(c).toString(16).padStart(2, '0')).join('')}`
-  }
-}
-
-/** Puts the caret/selection back after a toolbar control took focus, then runs the command. */
-function exec(command: string, value?: string) {
-  const el = editor.value
-  if (!el) return
-  el.focus()
-  if (savedRange) {
-    const selection = window.getSelection()
-    selection?.removeAllRanges()
-    selection?.addRange(savedRange)
-  }
-  document.execCommand('styleWithCSS', false, 'true')
-  document.execCommand(command, false, value)
-  onInput()
-  onSelectionChange()
-}
-
-/**
- * With just a caret (nothing selected), puts the style on an empty span (holding a zero-width space) that
- * typing then fills: the browser forgets a pending size/color once focus has moved to the dropdown or picker.
- * Returns false when there is a selection, which the caller formats with execCommand.
- */
-function styleAtCaret(style: Partial<CSSStyleDeclaration>): boolean {
-  if (!savedRange?.collapsed || !editor.value) return false
-  editor.value.focus()
-  const span = document.createElement('span')
-  Object.assign(span.style, style)
-  span.textContent = '\u200b'
-  savedRange.insertNode(span)
-  const caret = document.createRange()
-  caret.setStart(span.firstChild!, 1)
-  caret.collapse(true)
-  window.getSelection()?.removeAllRanges()
-  window.getSelection()?.addRange(caret)
-  onSelectionChange()
-  return true
-}
-
-function setColor(color: string) {
-  if (!styleAtCaret({ color })) exec('foreColor', color)
-  state.color = color
-}
-
-// execCommand only knows the 7 HTML font sizes, so mark with the largest and swap in the real size.
-function setSize(size: number) {
-  state.size = size
-  if (styleAtCaret({ fontSize: `${size}pt` })) return
-  exec('fontSize', '7')
-  editor.value?.querySelectorAll<HTMLElement>('font[size="7"], [style*="xxx-large"]').forEach((el) => {
-    el.removeAttribute('size')
-    el.style.fontSize = `${size}pt`
-  })
-}
-
-function onInput() {
-  if (!editor.value) return
-  const text = (editor.value.textContent ?? '').replace(/\u200b/g, '').trim()
-  empty.value = text === '' && editor.value.querySelector('img') === null
-}
-
-function pickImage() {
-  file.value?.click()
-}
-
-/** Puts a picture at the caret, in the line with the words. */
-function insertImage(run: ImageRun) {
-  const el = editor.value
-  if (!el) return
-  // Read the caret before focusing: focus fires selectionchange and would move it to the end.
-  const range = (editorRange() ?? savedRange)?.cloneRange() ?? null
-  el.focus()
-  const img = document.createElement('img')
-  img.src = run.image
-  img.alt = ''
-  img.draggable = false
-  img.dataset.width = String(run.width)
-  img.dataset.height = String(run.height)
-  img.style.width = `${run.width}pt`
-  img.style.height = `${run.height}pt`
-  img.style.verticalAlign = 'middle'
-  if (range && el.contains(range.commonAncestorContainer)) {
-    range.collapse(false)
-    range.insertNode(img)
-    range.setStartAfter(img)
-    range.collapse(true)
-    const selection = window.getSelection()
-    selection?.removeAllRanges()
-    selection?.addRange(range)
-    savedRange = range.cloneRange()
-  } else {
-    el.appendChild(img)
-  }
-  onInput()
-}
-
-function readImageFile(picked: File) {
-  if (!picked.type.startsWith('image/') || picked.size > 6_000_000) return
-  const reader = new FileReader()
-  reader.onload = () => {
-    const url = annotationImageSource(reader.result)
-    if (!url) return
-    void loadInlineImage(url).then((run) => {
-      if (run) insertImage(run)
-    })
-  }
-  reader.readAsDataURL(picked)
-}
-
-function onImage(event: Event) {
-  const input = event.target as HTMLInputElement
-  const picked = input.files?.[0]
-  input.value = ''
-  if (picked) readImageFile(picked)
-}
-
-function onPaste(event: ClipboardEvent) {
-  const picked = [...(event.clipboardData?.files ?? [])].find((item) => item.type.startsWith('image/'))
-  if (!picked) return
-  event.preventDefault()
-  readImageFile(picked)
+function refreshEmpty() {
+  const current = editor.value
+  if (!current) return
+  const text = current.getContent({ format: 'text' }).replace(/\u00a0/g, ' ').trim()
+  empty.value = text === '' && current.getBody()?.querySelector('img') == null
 }
 
 function save() {
-  if (!editor.value) return
-  const text = richTextFromElement(editor.value)
+  const current = editor.value
+  if (!current || !ready.value) return
+  const text = richTextFromElement(current.getBody())
   if (isEmptyText(text)) return
   emit('save', text)
 }
 
+function close() {
+  queueMicrotask(() => emit('cancel'))
+}
+
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
+    if (document.querySelector('.tox-dialog')) return
     event.preventDefault()
-    emit('cancel')
+    close()
   } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
     event.preventDefault()
     save()
   }
 }
 
-onMounted(() => {
-  const el = editor.value
-  if (!el) return
-  el.innerHTML = richTextToHtml(props.text)
-  document.execCommand('defaultParagraphSeparator', false, 'div')
-  document.addEventListener('selectionchange', onSelectionChange)
-  el.focus()
-  const range = document.createRange()
-  range.selectNodeContents(el)
-  range.collapse(false)
-  window.getSelection()?.removeAllRanges()
-  window.getSelection()?.addRange(range)
+onMounted(async () => {
+  const target = mount.value
+  if (!target) return
+  try {
+    const { mountAnnotationEditor } = await import('../annotations/hugerteEditor')
+    if (destroyed) return
+    const instance = await mountAnnotationEditor(target, {
+      html: richTextToHtml(props.text),
+      onChange: refreshEmpty,
+      onEscape: close,
+      onSave: save,
+    })
+    if (destroyed) {
+      instance.remove()
+      return
+    }
+    editor.value = instance
+    ready.value = true
+    refreshEmpty()
+  } catch (err) {
+    console.error(err)
+    if (!destroyed) failed.value = true
+  }
 })
 
-onBeforeUnmount(() => document.removeEventListener('selectionchange', onSelectionChange))
+onBeforeUnmount(() => {
+  destroyed = true
+  editor.value?.remove()
+  editor.value = null
+})
 </script>
 
 <template>
-  <div class="backdrop" @pointerdown.self="emit('cancel')">
+  <div class="backdrop" @pointerdown.self="close">
     <div class="annotation-editor" role="dialog" aria-label="Annotation text" @keydown="onKeydown">
-      <div class="format" role="toolbar" aria-label="Text formatting">
-        <button type="button" :class="{ active: state.bold }" title="Bold (Ctrl+B)" @mousedown.prevent @click="exec('bold')">
-          <AppIcon name="bold" />
-        </button>
-        <button type="button" :class="{ active: state.italic }" title="Italic (Ctrl+I)" @mousedown.prevent @click="exec('italic')">
-          <AppIcon name="italic" />
-        </button>
-        <button type="button" :class="{ active: state.underline }" title="Underline (Ctrl+U)" @mousedown.prevent @click="exec('underline')">
-          <AppIcon name="underline" />
-        </button>
-        <span class="divider" />
-        <select
-          title="Font size (pt)"
-          aria-label="Font size"
-          :value="state.size"
-          @change="setSize(Number(($event.target as HTMLSelectElement).value))"
-        >
-          <option v-if="!TEXT_SIZES.includes(state.size)" :value="state.size">{{ state.size }}</option>
-          <option v-for="size in TEXT_SIZES" :key="size" :value="size">{{ size }}</option>
-        </select>
-        <label class="color" title="Text color">
-          <AppIcon name="font" :style="{ borderBottomColor: state.color }" />
-          <input type="color" aria-label="Text color" :value="state.color" @change="setColor(($event.target as HTMLInputElement).value)" />
-        </label>
-        <span class="divider" />
-        <button type="button" :class="{ active: state.align === 'left' }" title="Align left" @mousedown.prevent @click="exec('justifyLeft')">
-          <AppIcon name="align-left" />
-        </button>
-        <button type="button" :class="{ active: state.align === 'center' }" title="Center" @mousedown.prevent @click="exec('justifyCenter')">
-          <AppIcon name="align-center" />
-        </button>
-        <button type="button" :class="{ active: state.align === 'right' }" title="Align right" @mousedown.prevent @click="exec('justifyRight')">
-          <AppIcon name="align-right" />
-        </button>
-        <span class="divider" />
-        <button type="button" title="Insert image" @mousedown.prevent @click="pickImage">
-          <AppIcon name="image" />
-        </button>
-        <input ref="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" hidden @change="onImage" />
-      </div>
-
-      <div
-        ref="editor"
-        class="text"
-        contenteditable="true"
-        role="textbox"
-        aria-multiline="true"
-        aria-label="Annotation text"
-        :data-placeholder="'Type the annotation…'"
-        :class="{ empty }"
-        :style="{ fontFamily: FONT_FAMILY, fontSize: `${DEFAULT_TEXT_SIZE}pt`, color: DEFAULT_TEXT_COLOR }"
-        @input="onInput"
-        @paste="onPaste"
-      />
+      <p v-if="!ready && !failed" class="status">Loading editor…</p>
+      <p v-if="failed" class="status failed">The editor could not be loaded.</p>
+      <div v-show="!failed" ref="mount" class="mount" />
 
       <div class="actions">
         <button v-if="!isNew" type="button" class="remove" title="Delete annotation" @click="emit('remove')">
           <AppIcon name="trash" /> Delete
         </button>
         <span class="spacer" />
-        <button type="button" @click="emit('cancel')">Cancel</button>
-        <button type="button" class="primary" :disabled="empty" title="Ctrl+Enter" @click="save">
+        <button type="button" @click="close">Cancel</button>
+        <button type="button" class="primary" :disabled="!ready || empty" title="Ctrl+Enter" @click="save">
           {{ isNew ? 'Add' : 'Save' }}
         </button>
       </div>
@@ -310,7 +122,7 @@ onBeforeUnmount(() => document.removeEventListener('selectionchange', onSelectio
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: min(34rem, calc(100% - 2rem));
+  width: min(40rem, calc(100% - 2rem));
   padding: 6px;
   border: 1px solid #c9d1dd;
   border-radius: 6px;
@@ -320,18 +132,29 @@ onBeforeUnmount(() => document.removeEventListener('selectionchange', onSelectio
   font-size: 13px;
 }
 
-.format,
+.mount {
+  min-height: 16rem;
+}
+
+.mount :deep(.tox-hugerte) {
+  border: 1px solid #c9d1dd;
+  border-radius: 4px;
+}
+
+.status {
+  margin: 0;
+  padding: 8px;
+  color: #8a94a3;
+}
+
+.status.failed {
+  color: #a33a3a;
+}
+
 .actions {
   display: flex;
   align-items: center;
   gap: 2px;
-}
-
-.divider {
-  width: 1px;
-  height: 20px;
-  margin: 0 4px;
-  background: #c9d1dd;
 }
 
 .spacer {
@@ -354,17 +177,8 @@ button {
   cursor: pointer;
 }
 
-.format button {
-  padding: 0;
-}
-
-button:hover:not(:disabled),
-button.active {
+button:hover:not(:disabled) {
   background: #e8eef8;
-}
-
-button.active {
-  border-color: #1f3a68;
 }
 
 button.primary {
@@ -385,73 +199,5 @@ button:disabled {
 
 button.remove {
   color: #a33a3a;
-}
-
-select {
-  height: 28px;
-  border: 1px solid #c9d1dd;
-  border-radius: 4px;
-  background: #fff;
-  color: inherit;
-  font: inherit;
-}
-
-.color {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  color: #1f3a68;
-  cursor: pointer;
-}
-
-.color:hover {
-  background: #e8eef8;
-}
-
-.color .app-icon {
-  box-sizing: content-box;
-  padding-bottom: 1px;
-  border-bottom: 3px solid;
-}
-
-.color input {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.text {
-  position: relative;
-  min-height: 7rem;
-  max-height: 50vh;
-  overflow: auto;
-  padding: 8px;
-  border: 1px solid #c9d1dd;
-  border-radius: 4px;
-  outline: none;
-  line-height: 1.2;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.text:focus {
-  border-color: #3d64b5;
-}
-
-.text :deep(img) {
-  vertical-align: middle;
-  max-width: 100%;
-}
-
-.text.empty::before {
-  content: attr(data-placeholder);
-  position: absolute;
-  color: #8a94a3;
-  pointer-events: none;
 }
 </style>

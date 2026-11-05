@@ -1,5 +1,5 @@
 import { encodePage } from '../export/encodedPage'
-import { tiffFile } from '../export/tiffFile'
+import { encodedTiffPage, tiffFile } from '../export/tiffFile'
 
 const STAND_IN_DPI = 200
 
@@ -14,7 +14,7 @@ export async function convertPdfToTiff(pdf: Blob, fileName: string): Promise<Blo
   for (let page = 1; page <= pageCount; page++) {
     pages.push(await encodePage(placeholderPage(fileName, page, pageCount), STAND_IN_DPI, STAND_IN_DPI))
   }
-  return tiffFile(pages)
+  return tiffFile(pages.map((page, index) => encodedTiffPage(page, index, pages.length)))
 }
 
 /** Page objects in the PDF; at least 1 (pages inside compressed object streams aren't found). */

@@ -56,19 +56,25 @@ export function paragraphSize(paragraph: TextParagraph): number {
   return paragraph.runs.reduce((size, run) => (isImageRun(run) ? size : Math.max(size, run.size)), 0) || DEFAULT_TEXT_SIZE
 }
 
+/** Keeps a picture's shape, caps the long side at `INLINE_IMAGE_MAX_PT`, and never goes below 8 pt. */
+function capPointBox(width: number, height: number): { width: number; height: number } {
+  let w = width
+  let h = height
+  const longest = Math.max(w, h)
+  if (longest > INLINE_IMAGE_MAX_PT) {
+    const scale = INLINE_IMAGE_MAX_PT / longest
+    w *= scale
+    h *= scale
+  }
+  const round = (value: number) => Math.round(Math.max(8, value) * 100) / 100
+  return { width: round(w), height: round(h) }
+}
+
 /** Point size for a picture of `naturalWidth` × `naturalHeight` CSS pixels, capped at `INLINE_IMAGE_MAX_PT`. */
 export function inlineImageBox(naturalWidth: number, naturalHeight: number): { width: number; height: number } {
   const widthPx = naturalWidth > 0 ? naturalWidth : 96
   const heightPx = naturalHeight > 0 ? naturalHeight : 96
-  let width = widthPx * 0.75
-  let height = heightPx * 0.75
-  const longest = Math.max(width, height)
-  if (longest > INLINE_IMAGE_MAX_PT) {
-    width *= INLINE_IMAGE_MAX_PT / longest
-    height *= INLINE_IMAGE_MAX_PT / longest
-  }
-  const round = (value: number) => Math.round(Math.max(8, value) * 100) / 100
-  return { width: round(width), height: round(height) }
+  return capPointBox(widthPx * 0.75, heightPx * 0.75)
 }
 
 /** Reads a picture's pixel size and returns an inline run, or null when it cannot be loaded. */
@@ -133,7 +139,7 @@ export function richTextToHtml(text: RichText): string {
     .join('')
 }
 
-const BLOCK_TAGS = new Set(['DIV', 'P', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE'])
+const BLOCK_TAGS = new Set(['DIV', 'P', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE', 'FIGURE'])
 
 function toHex(cssColor: string): string {
   const match = cssColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/)
@@ -149,7 +155,8 @@ function alignOf(element: Element): TextAlign {
 
 /**
  * Reads the editor's content into rich text, using computed styles so it doesn't matter which markup the
- * browser produced (b / span style / font). `root` must be attached to the document.
+ * browser produced (b / span style / font). `root` must be attached (the HugeRTE body is in its iframe).
+ * Elements are matched by tag name because an iframe's nodes are not this window's HTMLElement.
  */
 export function richTextFromElement(root: HTMLElement): RichText {
   const paragraphs: TextParagraph[] = []
@@ -183,24 +190,20 @@ export function richTextFromElement(root: HTMLElement): RichText {
           color: toHex(style.color),
           size: Math.round(Number.parseFloat(style.fontSize) * 0.75 * 2) / 2 || DEFAULT_TEXT_SIZE,
         })
-      } else if (child instanceof HTMLImageElement) {
-        const src = annotationImageSource(child.getAttribute('src'))
-        if (!src) continue
-        const width = Number(child.dataset.width)
-        const height = Number(child.dataset.height)
+      } else if (isTag(child, 'IMG')) {
+        // The editor is an iframe, so its elements are not this window's HTMLImageElement.
+        const run = imageRunFromElement(child)
+        if (!run) continue
         const paragraph: TextParagraph = current ?? start(child.parentElement ?? root)
-        paragraph.runs.push({
-          image: src,
-          width: Number.isFinite(width) && width > 0 ? width : INLINE_IMAGE_MAX_PT,
-          height: Number.isFinite(height) && height > 0 ? height : INLINE_IMAGE_MAX_PT,
-        })
-      } else if (child instanceof HTMLBRElement) {
+        paragraph.runs.push(run)
+      } else if (isTag(child, 'BR')) {
         if (!current) start(child.parentElement ?? root)
         current = null
-      } else if (child instanceof HTMLElement) {
-        const block = BLOCK_TAGS.has(child.tagName)
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const element = child as HTMLElement
+        const block = BLOCK_TAGS.has(element.tagName)
         if (block) current = null
-        walk(child)
+        walk(element)
         if (block) current = null
       }
     }
@@ -210,6 +213,28 @@ export function richTextFromElement(root: HTMLElement): RichText {
   for (const paragraph of paragraphs) paragraph.runs = mergeRuns(paragraph.runs)
   while (paragraphs.length > 0 && paragraphs[paragraphs.length - 1].runs.length === 0) paragraphs.pop()
   return paragraphs
+}
+
+/**
+ * Picture size in points. A laid-out image uses its CSS pixel size (HugeRTE stores a resize in pixels).
+ * `data-width` / `data-height` are the point size we wrote. Otherwise the natural pixel size is used.
+ */
+function isTag(node: Node, tag: string): node is HTMLElement {
+  return node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName === tag
+}
+
+function imageRunFromElement(img: HTMLElement): ImageRun | null {
+  const src = annotationImageSource(img.getAttribute('src'))
+  if (!src) return null
+  const style = getComputedStyle(img)
+  const cssWidth = Number.parseFloat(style.width)
+  const cssHeight = Number.parseFloat(style.height)
+  if (cssWidth > 0 && cssHeight > 0) return { image: src, ...capPointBox(cssWidth * 0.75, cssHeight * 0.75) }
+  const dataWidth = Number(img.dataset.width)
+  const dataHeight = Number(img.dataset.height)
+  if (dataWidth > 0 && dataHeight > 0) return { image: src, ...capPointBox(dataWidth, dataHeight) }
+  const natural = img as HTMLImageElement
+  return { image: src, ...inlineImageBox(natural.naturalWidth, natural.naturalHeight) }
 }
 
 function mergeRuns(runs: Run[]): Run[] {

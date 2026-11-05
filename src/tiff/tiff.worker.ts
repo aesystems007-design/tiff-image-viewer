@@ -4,7 +4,8 @@ import { isImageRun, type RichText } from '../annotations/richText'
 import { BORDER_COLOR, BORDER_WIDTH_PT } from '../annotations/richText'
 import { encodePage, type EncodedPage } from '../export/encodedPage'
 import { pdfFile } from '../export/pdfFile'
-import { tiffFile } from '../export/tiffFile'
+import { copyOriginalPage, imageIfdOffsets, type TiffPage } from '../export/tiffCopy'
+import { encodedTiffPage, tiffFile } from '../export/tiffFile'
 import { detectSkew } from './deskew'
 import { applyOps, type PageOp, type PixelOp, type TextOp } from './pageOps'
 import type { ExportFormat, ExportPage, PageInfo, WorkerRequest, WorkerResponse } from './protocol'
@@ -18,10 +19,17 @@ interface Source {
 interface Page {
   source: Source
   ifd: IFD
+  /** Byte offset of this page's IFD in `source`, or -1 when the raw IFDs could not be matched up. */
+  ifdOffset: number
 }
 
 /** Pages of the document, indexed like the main thread's pages: the opened file's, then each inserted file's. */
 let pages: Page[] = []
+/**
+ * Every image a page has been shown as. Index 0 is the file as opened (or inserted). Later entries are
+ * TIFFs a company's deskew or despeckle returned. Undo picks an earlier index; the bytes stay loaded.
+ */
+let pageRevisions: Page[][] = []
 
 function post(message: WorkerResponse) {
   self.postMessage(message)
@@ -45,11 +53,15 @@ function readPages(buffer: ArrayBuffer): Page[] {
   let ifds = source.ifds.filter((ifd) => !isReducedResolution(ifd))
   if (ifds.length === 0) ifds = source.ifds
   if (ifds.length === 0) throw new Error('No images found in this TIFF file.')
-  return ifds.map((ifd) => ({ source, ifd }))
+  const offsets = imageIfdOffsets(buffer)
+  // A mismatch means the raw walk and the decoded pages disagree, so every page is re-encoded.
+  const located = offsets.length === ifds.length
+  return ifds.map((ifd, index) => ({ source, ifd, ifdOffset: located ? offsets[index] : -1 }))
 }
 
 function open(data: ArrayBuffer): PageInfo[] {
   pages = readPages(data)
+  pageRevisions = pages.map((page) => [page])
   decoded.clear()
   return pages.map(({ ifd }) => pageInfo(ifd))
 }
@@ -58,7 +70,35 @@ function open(data: ArrayBuffer): PageInfo[] {
 function add(data: ArrayBuffer): PageInfo[] {
   const added = readPages(data)
   pages.push(...added)
+  pageRevisions.push(...added.map((page) => [page]))
   return added.map(({ ifd }) => pageInfo(ifd))
+}
+
+/**
+ * The image `revision` of one page. Revision 0 is the opened (or inserted) page. Missing revisions fall
+ * back to that, so a stale request still draws something.
+ */
+function pageAt(index: number, revision: number): Page {
+  const list = pageRevisions[index]
+  const page = list?.[revision] ?? list?.[0]
+  if (!page) throw new Error(`Page ${index + 1} does not exist.`)
+  return page
+}
+
+/** Saves `buffer` as the next image of each page in `indexes` (one TIFF page each, same order). */
+function replacePages(buffer: ArrayBuffer, indexes: readonly number[]): { page: number; revision: number; info: PageInfo }[] {
+  const added = readPages(buffer)
+  const expected = indexes.length === 1 ? '1 page' : `${indexes.length} pages`
+  const got = added.length === 1 ? '1 page' : `${added.length} pages`
+  if (added.length !== indexes.length) throw new Error(`Expected ${expected}, got ${got}.`)
+  for (const index of indexes) {
+    if (!pageRevisions[index]) throw new Error(`Page ${index + 1} does not exist.`)
+  }
+  return indexes.map((index, i) => {
+    const list = pageRevisions[index]
+    list.push(added[i])
+    return { page: index, revision: list.length - 1, info: pageInfo(added[i].ifd) }
+  })
 }
 
 function pageInfo(ifd: IFD): PageInfo {
@@ -85,23 +125,28 @@ const THUMBNAIL_SIZE = 240
 
 /** Decoded (unedited) pages kept in memory so re-rendering after an edit doesn't decode again. */
 const DECODED_CACHE_SIZE = 2
-const decoded = new Map<number, OffscreenCanvas>()
+const decoded = new Map<string, OffscreenCanvas>()
 
-function getDecodedPage(pageIndex: number): OffscreenCanvas {
-  let canvas = decoded.get(pageIndex)
+function decodedKey(pageIndex: number, revision: number): string {
+  return `${pageIndex}:${revision}`
+}
+
+function getDecodedPage(pageIndex: number, revision: number): OffscreenCanvas {
+  const key = decodedKey(pageIndex, revision)
+  let canvas = decoded.get(key)
   if (canvas) {
-    decoded.delete(pageIndex)
+    decoded.delete(key)
   } else {
-    canvas = decodePage(pageIndex)
+    canvas = decodePage(pageIndex, revision)
   }
-  decoded.set(pageIndex, canvas)
+  decoded.set(key, canvas)
   while (decoded.size > DECODED_CACHE_SIZE) decoded.delete(decoded.keys().next().value!)
   return canvas
 }
 
 /** The page with its edits applied. Never modifies the cached decoded page. */
-async function editedPage(pageIndex: number, ops: readonly PageOp[]): Promise<OffscreenCanvas> {
-  const base = getDecodedPage(pageIndex)
+async function editedPage(pageIndex: number, revision: number, ops: readonly PageOp[]): Promise<OffscreenCanvas> {
+  const base = getDecodedPage(pageIndex, revision)
   if (ops.length === 0) return base
 
   let canvas = toPaper(base, base.width, base.height)
@@ -291,8 +336,8 @@ function resize(source: OffscreenCanvas, width: number, height: number): Offscre
 /** Longest edge the page is reduced to for skew detection; plenty for lines of text, and quick. */
 const SKEW_DETECTION_SIZE = 1600
 
-async function skewAngle(pageIndex: number, ops: readonly PageOp[]): Promise<number> {
-  const page = await editedPage(pageIndex, ops)
+async function skewAngle(pageIndex: number, revision: number, ops: readonly PageOp[]): Promise<number> {
+  const page = await editedPage(pageIndex, revision, ops)
   const scale = Math.min(1, SKEW_DETECTION_SIZE / Math.max(page.width, page.height))
   const small = scale < 1 ? resize(page, Math.round(page.width * scale), Math.round(page.height * scale)) : page
   const image = context(small).getImageData(0, 0, small.width, small.height)
@@ -324,11 +369,12 @@ const MIN_INK_SAMPLES = 16
  */
 async function inspectRegions(
   pageIndex: number,
+  revision: number,
   ops: readonly PageOp[],
   regions: readonly { id: string; rect: { x: number; y: number; width: number; height: number } }[],
 ): Promise<string[]> {
   if (regions.length === 0) return []
-  const full = await editedPage(pageIndex, ops)
+  const full = await editedPage(pageIndex, revision, ops)
   const scale = Math.min(1, INSPECT_MAX_EDGE / Math.max(full.width, full.height))
   const width = Math.max(1, Math.round(full.width * scale))
   const height = Math.max(1, Math.round(full.height * scale))
@@ -367,10 +413,15 @@ async function inspectRegions(
   return hits
 }
 
-/** The page as shown: edits applied, turned by `rotation` (a multiple of 90°), on white. */
-async function orientedPage(pageIndex: number, ops: readonly PageOp[], rotation: number): Promise<OffscreenCanvas> {
-  const page = await editedPage(pageIndex, ops)
+/**
+ * The page as shown: edits applied, turned by `rotation` (a multiple of 90°), on white.
+ * A straight page is returned as-is. `getImageData` does not change the canvas, and `editedPage`
+ * returns the decode cache only when there are no ops, so that cache stays intact.
+ */
+async function orientedPage(pageIndex: number, revision: number, ops: readonly PageOp[], rotation: number): Promise<OffscreenCanvas> {
+  const page = await editedPage(pageIndex, revision, ops)
   const degrees = ((rotation % 360) + 360) % 360
+  if (degrees === 0) return page
   const sideways = degrees % 180 !== 0
   const canvas = new OffscreenCanvas(sideways ? page.height : page.width, sideways ? page.width : page.height)
   const ctx = context(canvas)
@@ -382,16 +433,51 @@ async function orientedPage(pageIndex: number, ops: readonly PageOp[], rotation:
   return canvas
 }
 
-/** Renders and compresses the pages one at a time, then writes them to one file. */
-async function exportPages(pages: readonly ExportPage[], format: ExportFormat): Promise<Blob> {
-  const encoded: EncodedPage[] = []
-  for (const { page, ops, rotation, dpiX, dpiY } of pages) {
-    const canvas = await orientedPage(page, ops, rotation)
-    const image = context(canvas).getImageData(0, 0, canvas.width, canvas.height)
-    const sideways = (((rotation % 360) + 360) % 360) % 180 !== 0
-    encoded.push(await encodePage(image, sideways ? dpiY : dpiX, sideways ? dpiX : dpiY))
+/**
+ * Writes the pages in order. A TIFF copies the original compressed strips of a page that has no edits
+ * and no rotation (deleted pages are simply absent; a new order is those strips in the new order).
+ * Anything else is redrawn. A PDF cannot reuse TIFF strips, so every page of one is redrawn.
+ * `report` runs at the start of each page, before the slow work.
+ */
+async function exportPages(
+  list: readonly ExportPage[],
+  format: ExportFormat,
+  report: (done: number, total: number) => void,
+): Promise<Blob> {
+  if (format === 'pdf') {
+    const encoded: EncodedPage[] = []
+    for (let i = 0; i < list.length; i++) {
+      report(i + 1, list.length)
+      await Promise.resolve()
+      encoded.push(await encodeExportPage(list[i]))
+    }
+    return pdfFile(encoded)
   }
-  return format === 'pdf' ? pdfFile(encoded) : tiffFile(encoded)
+
+  const out: TiffPage[] = []
+  for (let i = 0; i < list.length; i++) {
+    report(i + 1, list.length)
+    await Promise.resolve()
+    const spec = list[i]
+    const rotation = ((spec.rotation % 360) + 360) % 360
+    const stored = pageRevisions[spec.page]?.[spec.revision ?? 0]
+    if (rotation === 0 && spec.ops.length === 0 && stored && stored.ifdOffset >= 0) {
+      const original = copyOriginalPage(stored.source.buffer, stored.ifdOffset, i, list.length)
+      if (original) {
+        out.push(original)
+        continue
+      }
+    }
+    out.push(encodedTiffPage(await encodeExportPage(spec), i, list.length))
+  }
+  return tiffFile(out)
+}
+
+async function encodeExportPage(spec: ExportPage): Promise<EncodedPage> {
+  const canvas = await orientedPage(spec.page, spec.revision ?? 0, spec.ops, spec.rotation)
+  const image = context(canvas).getImageData(0, 0, canvas.width, canvas.height)
+  const sideways = (((spec.rotation % 360) + 360) % 360) % 180 !== 0
+  return encodePage(image, sideways ? spec.dpiY : spec.dpiX, sideways ? spec.dpiX : spec.dpiY)
 }
 
 function context(canvas: OffscreenCanvas): OffscreenCanvasRenderingContext2D {
@@ -400,10 +486,8 @@ function context(canvas: OffscreenCanvas): OffscreenCanvasRenderingContext2D {
   return ctx
 }
 
-function decodeRgba(pageIndex: number): { rgba: Uint8Array; width: number; height: number } {
-  const page = pages[pageIndex]
-  if (!page) throw new Error(`Page ${pageIndex + 1} does not exist.`)
-  const { source, ifd } = page
+function decodeRgba(pageIndex: number, revision: number): { rgba: Uint8Array; width: number; height: number } {
+  const { source, ifd } = pageAt(pageIndex, revision)
 
   UTIF.decodeImage(source.buffer, ifd, source.ifds)
   const rgba = UTIF.toRGBA8(ifd)
@@ -412,8 +496,8 @@ function decodeRgba(pageIndex: number): { rgba: Uint8Array; width: number; heigh
   return { rgba, width, height }
 }
 
-function decodePage(pageIndex: number): OffscreenCanvas {
-  const { rgba, width, height } = decodeRgba(pageIndex)
+function decodePage(pageIndex: number, revision: number): OffscreenCanvas {
+  const { rgba, width, height } = decodeRgba(pageIndex, revision)
   const canvas = new OffscreenCanvas(width, height)
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Could not create a 2D canvas context.')
@@ -428,12 +512,12 @@ function decodePage(pageIndex: number): OffscreenCanvas {
  * dominated thumbnail time past the first screenful). Edited pages still render fully, then take the
  * same filter from the canvas.
  */
-async function thumbnailBlob(pageIndex: number, ops: readonly PageOp[]): Promise<Blob> {
-  if (ops.length === 0 && !decoded.has(pageIndex)) {
-    const { rgba, width, height } = decodeRgba(pageIndex)
+async function thumbnailBlob(pageIndex: number, revision: number, ops: readonly PageOp[]): Promise<Blob> {
+  if (ops.length === 0 && !decoded.has(decodedKey(pageIndex, revision))) {
+    const { rgba, width, height } = decodeRgba(pageIndex, revision)
     return downscaleRgba(rgba, width, height, THUMBNAIL_SIZE).convertToBlob({ type: 'image/png' })
   }
-  return makeThumbnail(await editedPage(pageIndex, ops))
+  return makeThumbnail(await editedPage(pageIndex, revision, ops))
 }
 
 function makeThumbnail(source: OffscreenCanvas): Promise<Blob> {
@@ -494,8 +578,8 @@ function downscaleRgba(
   return canvas
 }
 
-async function render(pageIndex: number, ops: readonly PageOp[]): Promise<{ blob: Blob; thumbnail: Blob }> {
-  const canvas = await editedPage(pageIndex, ops)
+async function render(pageIndex: number, revision: number, ops: readonly PageOp[]): Promise<{ blob: Blob; thumbnail: Blob }> {
+  const canvas = await editedPage(pageIndex, revision, ops)
   const [blob, thumbnail] = await Promise.all([canvas.convertToBlob({ type: 'image/png' }), makeThumbnail(canvas)])
   return { blob, thumbnail }
 }
@@ -510,29 +594,48 @@ self.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
       case 'add':
         post({ id: request.id, type: 'added', pages: add(request.buffer) })
         break
+      case 'replace':
+        post({ id: request.id, type: 'replaced', pages: replacePages(request.buffer, request.pages) })
+        break
       case 'render':
-        post({ id: request.id, type: 'rendered', page: request.page, ...(await render(request.page, request.ops)) })
+        post({
+          id: request.id,
+          type: 'rendered',
+          page: request.page,
+          ...(await render(request.page, request.revision, request.ops)),
+        })
         break
       case 'thumbnail':
         post({
           id: request.id,
           type: 'thumbnail',
           page: request.page,
-          blob: await thumbnailBlob(request.page, request.ops),
+          blob: await thumbnailBlob(request.page, request.revision, request.ops),
         })
         break
       case 'export':
-        post({ id: request.id, type: 'exported', blob: await exportPages(request.pages, request.format) })
+        post({
+          id: request.id,
+          type: 'exported',
+          blob: await exportPages(request.pages, request.format, (done, total) => {
+            post({ id: request.id, type: 'export-progress', done, total })
+          }),
+        })
         break
       case 'skew':
-        post({ id: request.id, type: 'skew', page: request.page, angle: await skewAngle(request.page, request.ops) })
+        post({
+          id: request.id,
+          type: 'skew',
+          page: request.page,
+          angle: await skewAngle(request.page, request.revision, request.ops),
+        })
         break
       case 'inspect-regions':
         post({
           id: request.id,
           type: 'regions-hit',
           page: request.page,
-          hits: await inspectRegions(request.page, request.ops, request.regions),
+          hits: await inspectRegions(request.page, request.revision, request.ops, request.regions),
         })
         break
     }

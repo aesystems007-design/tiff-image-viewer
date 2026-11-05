@@ -16,6 +16,8 @@ const props = defineProps<{
   rotations: readonly number[]
   /** Pixel edits per page; thumbnails show the edited page. */
   ops: readonly (readonly PageOp[])[]
+  /** Which image each page shows (0 = the opened file). A change reloads a thumbnail whose ops did not. */
+  revisions: readonly number[]
   /** Page sizes with edits applied (paper-size conversions change them). */
   pageInfos: readonly PageInfo[]
   /** Margins / keep-clear areas per page (page pixels), same as drawn in the viewer. */
@@ -119,12 +121,16 @@ const failed = ref<Record<number, boolean>>({})
 const requestedKeys = new Map<number, string>()
 let observer: IntersectionObserver | null = null
 
+function thumbKey(page: number): string {
+  return `${props.revisions[page] ?? 0}|${opsKey(props.ops[page] ?? [])}`
+}
+
 function load(page: number) {
   const ops = props.ops[page] ?? []
-  const key = opsKey(ops)
+  const key = thumbKey(page)
   requestedKeys.set(page, key)
   props.doc
-    .getThumbnailUrl(page, ops)
+    .getThumbnailUrl(page, ops, props.revisions[page] ?? 0)
     .then((url) => {
       // Keep showing the previous thumbnail if a newer edit was requested meanwhile.
       if (requestedKeys.get(page) === key) urls.value[page] = url
@@ -134,10 +140,10 @@ function load(page: number) {
 
 // Refresh thumbnails whose page was edited (only those already loaded; the rest load on scroll).
 watch(
-  () => props.ops,
-  (ops) => {
+  () => [props.ops, props.revisions] as const,
+  () => {
     for (const [page, key] of requestedKeys) {
-      if (opsKey(ops[page] ?? []) !== key) load(page)
+      if (thumbKey(page) !== key) load(page)
     }
   },
 )

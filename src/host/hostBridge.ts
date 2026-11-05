@@ -7,6 +7,7 @@
  * handles Apply via `save-requested` → `save-acked` / `save-failed`.
  */
 
+import type { PageToolName } from './pageTools'
 import { marginSpecFromHost, type MarginSpec } from '../margins/margins'
 import { actionBrandFromHost, type ActionBrand } from './actionBrand'
 import { allowedPageSizeFromHost, type AllowedPageSizeRule } from './allowedPageSize'
@@ -55,6 +56,20 @@ export type ViewerEvent =
       status: 'Success' | 'Error'
       message: string
       annotations: BurnedAnnotation[]
+    }
+  /**
+   * The user clicked Deskew or Despeckle and the company handles that tool (`set-page-tools`, or there is no
+   * `window.tiffViewerPageTools` function). `buffer` is a TIFF of `pageIndexes` in that order (pending edits
+   * included, rotation not applied). Answer with `page-tool-result` and the same `requestId`.
+   */
+  | {
+      type: 'page-tool-requested'
+      requestId: number
+      tool: PageToolName
+      scope: 'page' | 'all'
+      /** Display position of each page in `buffer` (0 = the first page on screen). */
+      pageIndexes: number[]
+      buffer: ArrayBuffer
     }
   /**
    * Answer to `remove-uneditable-annotation`. On success that one overlay is gone (it was not drawn into
@@ -194,6 +209,18 @@ export type HostCommand =
    * `ANY`, or a missing size, clears the page-size warnings. Does not dirty the document or reopen the image.
    */
   | { type: 'set-allowed-page-size'; allowedPageSize: AllowedPageSizeRule }
+  /**
+   * Hand deskew and/or despeckle to the host. `true` means a click sends `page-tool-requested` and waits for
+   * `page-tool-result`. `false` or null restores the built-in. A field left out stays as it is. A function on
+   * `window.tiffViewerPageTools` is used instead of this when it is set.
+   */
+  | { type: 'set-page-tools'; deskew: boolean | undefined; despeckle: boolean | undefined }
+  /**
+   * The TIFF from the company's deskew or despeckle. `buffer` has one page per page in the request, in the
+   * same order. Null, or an empty buffer, leaves the pages unchanged. `message` reports a failure and changes
+   * nothing. `requestId` must be the one from `page-tool-requested`.
+   */
+  | { type: 'page-tool-result'; requestId: number; buffer: ArrayBuffer | null; message: string | null }
 
 /**
  * `?viewerId=` in the page URL: echoed in every event so a host running several viewers (tabs) can tell them
@@ -214,7 +241,7 @@ export function notifyHost(event: ViewerEvent) {
     (target): target is Window => !!target && target !== window,
   )
   targets.forEach((target, index) => {
-    if (event.type === 'save-requested' || event.type === 'file-dropped') {
+    if (event.type === 'save-requested' || event.type === 'file-dropped' || event.type === 'page-tool-requested') {
       // Transfer a dedicated copy per target so posting to parent and opener both work.
       const buffer = index === targets.length - 1 ? event.buffer : event.buffer.slice(0)
       target.postMessage({ ...base, ...event, buffer }, HOST_ORIGIN, [buffer])
@@ -367,7 +394,28 @@ function parseCommand(data: unknown): HostCommand | null {
     return { type: 'set-allowed-page-size', allowedPageSize: allowedPageSizeFromHost(message.allowedPageSize, message.threshold) }
   }
 
+  if (message.type === 'set-page-tools') {
+    const deskew = toolFlag(message, 'deskew')
+    const despeckle = toolFlag(message, 'despeckle')
+    if (deskew === undefined && despeckle === undefined) return null
+    return { type: 'set-page-tools', deskew, despeckle }
+  }
+
+  if (message.type === 'page-tool-result') {
+    const requestId = message.requestId
+    if (typeof requestId !== 'number' || !Number.isInteger(requestId)) return null
+    const text = typeof message.message === 'string' && message.message ? message.message : null
+    const buffer = message.buffer instanceof ArrayBuffer && message.buffer.byteLength > 0 ? message.buffer : null
+    return { type: 'page-tool-result', requestId, buffer, message: text }
+  }
+
   return null
+}
+
+/** `true` hands the tool to the host. `false`, null, or '' restores the built-in. A missing field is left out. */
+function toolFlag(message: Record<string, unknown>, name: 'deskew' | 'despeckle'): boolean | undefined {
+  if (!(name in message)) return undefined
+  return message[name] === true
 }
 
 /** Calls `handler` for every command from the host; returns a function that stops listening. */

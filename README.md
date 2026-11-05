@@ -444,7 +444,7 @@ An editable annotation can be moved, resized, edited, and deleted in the viewer.
 | `Border` | `"True"` draws a 0.72 pt black frame at 75% opacity when the annotation is burned in. |
 | `placeBackground` | Fill shown while the box is on the page. A color, or `"transparent"` / `null` for none. Omitted draws no fill. |
 | `burnBackground` | Fill drawn into the page on burn. A color, or `"transparent"` / `null` for none. Omitted draws no fill. Independent of `placeBackground`. |
-| `image` | A picture inserted inline at the end of the text, in the flow with the words. A `data:image/…` URL or an `http(s)` address (`Image` is accepted too). The annotation editor's picture button inserts one the same way, at the caret. |
+| `image` | A picture inserted inline at the end of the text, in the flow with the words. A `data:image/…` URL or an `http(s)` address (`Image` is accepted too). The annotation editor's image button inserts one the same way, at the caret. |
 | `html` | HTML drawn instead of the rich text (`Html` is accepted too). `<style>` and `<img>` render. Scripts, event handlers, and frames are dropped. `Text` can be omitted when `html` or `image` is set. |
 | `AnnotationType` | Name. Default `VerbiageStamp`. |
 | `Name`, `FontName`, `AnnotationFilename` | Ignored. Text is drawn in Arial. |
@@ -699,6 +699,44 @@ Names: `sidebar`, `undo`, `print`, `download`, `insert`, `scan`, `delete`, `rota
 
 Scan stays hidden until a product key is set, even when `scan` is `true`. Hiding `undo` also turns off Ctrl+Z. Hiding `page-nav` also turns off Page Up and Page Down. Scrolling the page and Ctrl+wheel zoom are unchanged.
 
+## Deskew and despeckle
+
+The toolbar deskew and despeckle buttons use the built-in tools until a company takes one over. The thin button sends the selected pages. The large button sends every visible page. Area despeckle (the box drawn on one page) stays the built-in.
+
+The viewer hands the company a TIFF of those pages, in display order, with pending edits already drawn in. The on-screen rotation is not drawn in. The company returns a TIFF with one page for each of those pages, in the same order. That image replaces the page. It is a pending edit: Undo, Cancel, and Apply treat it like any other edit. Returning null, or an empty buffer, leaves the pages as they are. Anything that is not a TIFF is an error and changes nothing.
+
+Same origin, set a function. It can call the company's API. It is read when the button is clicked, so it can be assigned after the viewer has loaded:
+
+```js
+iframe.contentWindow.tiffViewerPageTools = {
+  deskew: async ({ buffer, scope, pageIndexes }) => {
+    const response = await fetch('/api/deskew', { method: 'POST', body: buffer })
+    if (!response.ok) throw new Error('Deskew failed')
+    return await response.arrayBuffer()
+  },
+  despeckle: async ({ buffer }) => {
+    const response = await fetch('/api/despeckle', { method: 'POST', body: buffer })
+    return await response.arrayBuffer()
+  },
+}
+```
+
+`scope` is `"page"` or `"all"`. `pageIndexes` are display positions (0 is the first page on screen), in the same order as the pages in `buffer`. Leave a function off and that tool stays built-in.
+
+From another origin, the function cannot be set on the iframe. Tell the viewer to ask instead:
+
+```json
+{ "target": "tiff-image-viewer", "type": "set-page-tools", "deskew": true, "despeckle": true }
+```
+
+`true` hands that tool over. `false` or `null` restores the built-in. A field left out stays as it is. A click then sends `page-tool-requested` (`requestId`, `tool`, `scope`, `pageIndexes`, `buffer`). Answer with the same `requestId`:
+
+```json
+{ "target": "tiff-image-viewer", "type": "page-tool-result", "requestId": 1, "buffer": "<TIFF bytes>" }
+```
+
+Transfer `[buffer]`. `message` reports a failure and changes nothing. Leave `buffer` out, or send null, when there is nothing to change. A function on `window.tiffViewerPageTools` is used instead of this round trip when it is set.
+
 ## Scanning
 
 The scan button is hidden until a Dynamsoft Dynamic Web TWAIN product key is set. The key is never sent back on an event.
@@ -751,6 +789,8 @@ Open http://localhost:5173/examples/host.html. The left side loads a TIFF from `
 | `set-icons` | `icons`, `iconFont?` | Image URL, `<svg>`, Font Awesome `<i>`, or null, by icon name. `iconFont` is the Font Awesome CSS or kit script. |
 | `set-buttons` | `buttons` | `false` hides a toolbar button. `true`, `null`, or `""` shows it. A name left out stays as it is. |
 | `set-scan-license` | `productKey` | Dynamic Web TWAIN key. `null` hides Scan. |
+| `set-page-tools` | `deskew?`, `despeckle?` | `true` hands that tool to the host. `false` or `null` restores the built-in. |
+| `page-tool-result` | `requestId`, `buffer?`, `message?` | The TIFF from the company's deskew or despeckle. `message` is a failure. |
 | `add-annotation` | `annotation`, `dpi?`, `requestId?` | Add one editable or uneditable overlay. |
 | `remove-uneditable-annotation` | `annotationId`, `requestId?` | Remove one uneditable overlay. |
 | `burn-annotations` | `requestId?` | Draw every overlay into its page. |
@@ -765,6 +805,7 @@ Open http://localhost:5173/examples/host.html. The left side loads a TIFF from `
 | `save-requested` | `id`, `name`, `buffer` | Apply, hosted, and the document has an id. |
 | `document-saved` | `id` | After `save-acked` commits the edits. |
 | `file-dropped` | `name`, `buffer` | A file was dropped on a hosted viewer. |
+| `page-tool-requested` | `requestId`, `tool`, `scope`, `pageIndexes`, `buffer` | Deskew or despeckle the company handles. `buffer` is the TIFF to process. |
 | `annotation-result` | `requestId`, `status`, `message`, `annotationId?` | Answer to `add-annotation`. |
 | `uneditable-annotation-removed` | `requestId`, `status`, `message`, `annotationId?`, `remaining` | Answer to `remove-uneditable-annotation`. |
 | `annotations-burned` | `requestId`, `status`, `message`, `annotations` | Answer to `burn-annotations`. |

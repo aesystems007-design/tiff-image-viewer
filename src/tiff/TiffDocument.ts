@@ -9,10 +9,13 @@ interface Pending {
   reject: (error: Error) => void
   /** Thumbnail job: the next thumbnail is queued before background work (warning scans) can start. */
   thumbnail?: boolean
+  /** Export only. Progress does not finish the job or free the worker. */
+  onProgress?: (done: number, total: number) => void
 }
 
 interface Thumbnail {
   page: number
+  revision: number
   ops: readonly PageOp[]
   promise: Promise<string>
   resolve: (url: string) => void
@@ -35,8 +38,8 @@ const PRIORITY_RENDER = 0
 const PRIORITY_THUMBNAIL = 1
 const PRIORITY_BACKGROUND = 2
 
-function versionKey(page: number, ops: readonly PageOp[]): string {
-  return `${page}|${opsKey(ops)}`
+function versionKey(page: number, revision: number, ops: readonly PageOp[]): string {
+  return `${page}|${revision}|${opsKey(ops)}`
 }
 
 /** Callers may pass Vue reactive proxies, which postMessage cannot clone. */
@@ -56,7 +59,10 @@ export class TiffDocument {
   private static nextDocumentId = 1
 
   readonly id = TiffDocument.nextDocumentId++
+  /** Revision 0 of every page: the opened file, then each inserted file. */
   pages: PageInfo[] = []
+  /** Every image a page can show. Index 0 matches `pages`. Later entries are company deskew / despeckle results. */
+  private revisionInfos: PageInfo[][] = []
 
   private nextId = 1
   private pending = new Map<number, Pending>()
@@ -81,6 +87,10 @@ export class TiffDocument {
       const response = event.data
       const pending = this.pending.get(response.id)
       if (!pending) return
+      if (response.type === 'export-progress') {
+        pending.onProgress?.(response.done, response.total)
+        return
+      }
       this.pending.delete(response.id)
       const wasThumbnail = pending.thumbnail === true
       if (response.type === 'error') pending.reject(new Error(response.message))
@@ -105,6 +115,7 @@ export class TiffDocument {
       const response = await doc.send({ type: 'open', buffer }, [buffer])
       if (response.type !== 'opened') throw new Error('Unexpected response from TIFF decoder.')
       doc.pages = response.pages
+      doc.revisionInfos = response.pages.map((info) => [info])
       return doc
     } catch (err) {
       doc.dispose()
@@ -122,7 +133,28 @@ export class TiffDocument {
     if (response.type !== 'added') throw new Error('Unexpected response from TIFF decoder.')
     const first = this.pages.length
     this.pages = [...this.pages, ...response.pages]
+    this.revisionInfos.push(...response.pages.map((info) => [info]))
     return { first, count: response.pages.length }
+  }
+
+  /** The size of one page at `revision` (0 = the opened or inserted image), before pixel edits. */
+  revisionInfo(page: number, revision: number): PageInfo {
+    const list = this.revisionInfos[page]
+    return list?.[revision] ?? list?.[0] ?? this.pages[page]
+  }
+
+  /**
+   * Stores `tiff` as the next image of each file index in `pages` (one TIFF page each, same order).
+   * Earlier images stay loaded so Undo can show them. Returns the revision number to display for each page.
+   */
+  async replacePages(tiff: ArrayBuffer, pages: readonly number[]): Promise<{ page: number; revision: number }[]> {
+    const response = await this.send({ type: 'replace', buffer: tiff, pages }, [tiff])
+    if (response.type !== 'replaced') throw new Error('Unexpected response from TIFF decoder.')
+    for (const item of response.pages) {
+      const list = this.revisionInfos[item.page]
+      if (list) list[item.revision] = item.info
+    }
+    return response.pages.map(({ page, revision }) => ({ page, revision }))
   }
 
   get pageCount(): number {
@@ -130,16 +162,16 @@ export class TiffDocument {
   }
 
   /** Returns a blob URL for a PNG rendering of the given page (0-based) with `ops` applied. */
-  getPageUrl(page: number, ops: readonly PageOp[] = []): Promise<string> {
-    const key = versionKey(page, ops)
+  getPageUrl(page: number, ops: readonly PageOp[] = [], revision = 0): Promise<string> {
+    const key = versionKey(page, revision, ops)
     let url = this.pageUrls.get(key)
     if (url) {
       this.pageUrls.delete(key)
     } else {
       ops = plainOps(ops)
-      url = this.send({ type: 'render', page, ops }, [], PRIORITY_RENDER).then((response) => {
+      url = this.send({ type: 'render', page, revision, ops }, [], PRIORITY_RENDER).then((response) => {
         if (response.type !== 'rendered') throw new Error('Unexpected response from TIFF decoder.')
-        this.provideThumbnail(page, ops, response.thumbnail)
+        this.provideThumbnail(page, revision, ops, response.thumbnail)
         return URL.createObjectURL(response.blob)
       })
       url.catch(() => this.pageUrls.delete(key))
@@ -161,10 +193,10 @@ export class TiffDocument {
    * Returns a blob URL for a small PNG preview of the given page (0-based) with `ops` applied.
    * Requests are queued and sent one at a time so full-page renders are never stuck behind them.
    */
-  getThumbnailUrl(page: number, ops: readonly PageOp[] = []): Promise<string> {
+  getThumbnailUrl(page: number, ops: readonly PageOp[] = [], revision = 0): Promise<string> {
     ops = plainOps(ops)
-    const key = versionKey(page, ops)
-    const thumbnail = this.thumbnailEntry(page, ops)
+    const key = versionKey(page, revision, ops)
+    const thumbnail = this.thumbnailEntry(page, revision, ops)
     if (!thumbnail.settled && !thumbnail.queued) {
       thumbnail.queued = true
       this.thumbnailQueue.push(key)
@@ -174,8 +206,8 @@ export class TiffDocument {
   }
 
   /** Skew of the given page (0-based) with `ops` applied, in degrees clockwise; 0 = straight or not measurable. */
-  async measureSkew(page: number, ops: readonly PageOp[] = []): Promise<number> {
-    const response = await this.send({ type: 'skew', page, ops: plainOps(ops) }, [], PRIORITY_BACKGROUND)
+  async measureSkew(page: number, ops: readonly PageOp[] = [], revision = 0): Promise<number> {
+    const response = await this.send({ type: 'skew', page, revision, ops: plainOps(ops) }, [], PRIORITY_BACKGROUND)
     if (response.type !== 'skew') throw new Error('Unexpected response from TIFF decoder.')
     return response.angle
   }
@@ -189,10 +221,11 @@ export class TiffDocument {
     page: number,
     ops: readonly PageOp[],
     regions: readonly { id: string; rect: ImageRect }[],
+    revision = 0,
   ): Promise<string[]> {
     if (regions.length === 0) return []
     const response = await this.send(
-      { type: 'inspect-regions', page, ops: plainOps(ops), regions },
+      { type: 'inspect-regions', page, revision, ops: plainOps(ops), regions },
       [],
       PRIORITY_BACKGROUND,
     )
@@ -200,10 +233,17 @@ export class TiffDocument {
     return response.hits
   }
 
-  /** One PDF or multi-page TIFF file of `pages`, in that order, with their edits and rotations applied. */
-  async exportFile(pages: readonly ExportPage[], format: ExportFormat): Promise<Blob> {
+  /**
+   * One PDF or multi-page TIFF file of `pages`, in that order, with their edits and rotations applied.
+   * `onProgress` is called with the page about to be written (1-based) and the page count.
+   */
+  async exportFile(
+    pages: readonly ExportPage[],
+    format: ExportFormat,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<Blob> {
     const plain = pages.map((page) => ({ ...page, ops: plainOps(page.ops) }))
-    const response = await this.send({ type: 'export', pages: plain, format }, [], PRIORITY_RENDER)
+    const response = await this.send({ type: 'export', pages: plain, format }, [], PRIORITY_RENDER, onProgress)
     if (response.type !== 'exported') throw new Error('Unexpected response from TIFF decoder.')
     return response.blob
   }
@@ -244,8 +284,8 @@ export class TiffDocument {
     }
   }
 
-  private thumbnailEntry(page: number, ops: readonly PageOp[]): Thumbnail {
-    const key = versionKey(page, ops)
+  private thumbnailEntry(page: number, revision: number, ops: readonly PageOp[]): Thumbnail {
+    const key = versionKey(page, revision, ops)
     let thumbnail = this.thumbnails.get(key)
     if (!thumbnail) {
       let resolve!: (url: string) => void
@@ -254,14 +294,14 @@ export class TiffDocument {
         resolve = res
         reject = rej
       })
-      thumbnail = { page, ops, promise, resolve, reject, settled: false, queued: false }
+      thumbnail = { page, revision, ops, promise, resolve, reject, settled: false, queued: false }
       this.thumbnails.set(key, thumbnail)
     }
     return thumbnail
   }
 
-  private provideThumbnail(page: number, ops: readonly PageOp[], blob: Blob) {
-    const thumbnail = this.thumbnailEntry(page, ops)
+  private provideThumbnail(page: number, revision: number, ops: readonly PageOp[], blob: Blob) {
+    const thumbnail = this.thumbnailEntry(page, revision, ops)
     if (thumbnail.settled) return
     thumbnail.settled = true
     thumbnail.url = URL.createObjectURL(blob)
@@ -295,17 +335,17 @@ export class TiffDocument {
     const target = this.thumbnails.get(key)
     if (!target || target.settled) return
 
-    const { page, ops } = target
+    const { page, revision, ops } = target
     this.thumbnailInFlight = true
     // The worker message handler queues the following thumbnail. Doing it here as well let a
     // background job start in between, so a long document's later pages waited twice.
-    this.send({ type: 'thumbnail', page, ops }, [], PRIORITY_THUMBNAIL)
+    this.send({ type: 'thumbnail', page, revision, ops }, [], PRIORITY_THUMBNAIL)
       .then((response) => {
         if (response.type !== 'thumbnail') throw new Error('Unexpected response from TIFF decoder.')
-        this.provideThumbnail(page, ops, response.blob)
+        this.provideThumbnail(page, revision, ops, response.blob)
       })
       .catch((err: Error) => {
-        const thumbnail = this.thumbnailEntry(page, ops)
+        const thumbnail = this.thumbnailEntry(page, revision, ops)
         if (thumbnail.settled) return
         thumbnail.settled = true
         thumbnail.reject(err)
@@ -320,11 +360,12 @@ export class TiffDocument {
     request: DistributiveOmit<WorkerRequest, 'id'>,
     transfer: Transferable[] = [],
     priority = PRIORITY_RENDER,
+    onProgress?: (done: number, total: number) => void,
   ): Promise<WorkerResponse> {
     if (this.disposed) return Promise.reject(new Error('Document was closed.'))
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, thumbnail: request.type === 'thumbnail' })
+      this.pending.set(id, { resolve, reject, thumbnail: request.type === 'thumbnail', onProgress })
       const seq = this.jobSeq++
       this.jobQueue.push({
         priority,

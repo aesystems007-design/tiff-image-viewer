@@ -42,11 +42,12 @@ export async function printDocument(
   pages: readonly number[],
   rotations: readonly number[],
   ops: readonly (readonly PageOp[])[],
+  revisions: readonly number[] = [],
 ): Promise<void> {
   const urls: string[] = []
   const temporaryUrls: string[] = []
   for (const page of pages) {
-    const url = await doc.getPageUrl(page, ops[page] ?? [])
+    const url = await doc.getPageUrl(page, ops[page] ?? [], revisions[page] ?? 0)
     const rotation = rotations[page] ?? 0
     if (rotation === 0) {
       urls.push(url)

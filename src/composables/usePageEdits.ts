@@ -10,6 +10,11 @@ interface EditState {
   deleted: boolean[]
   /** Page indexes (into the file) in display order. */
   order: number[]
+  /**
+   * Which image each page shows. 0 is the opened or inserted file. A higher number is a TIFF a company's
+   * deskew or despeckle returned for that page.
+   */
+  revisions: number[]
 }
 
 function normalize(degrees: number): number {
@@ -22,6 +27,7 @@ function emptyState(pageCount: number): EditState {
     ops: Array.from({ length: pageCount }, () => []),
     deleted: new Array<boolean>(pageCount).fill(false),
     order: Array.from({ length: pageCount }, (_, i) => i),
+    revisions: new Array<number>(pageCount).fill(0),
   }
 }
 
@@ -45,6 +51,7 @@ function withPages(state: EditState, added: readonly number[], before: number | 
     ops: extend<PageOp[]>(state.ops, []),
     deleted: extend(state.deleted, true).map((isDeleted, page) => (added.includes(page) ? !present : isDeleted)),
     order,
+    revisions: extend(state.revisions, 0),
   }
 }
 
@@ -98,6 +105,7 @@ export function usePageEdits() {
 
   const rotations = computed<readonly number[]>(() => pending.value.rotations)
   const ops = computed<readonly (readonly PageOp[])[]>(() => pending.value.ops)
+  const revisions = computed<readonly number[]>(() => pending.value.revisions)
   const deleted = computed<readonly boolean[]>(() => pending.value.deleted)
   /** Indexes of the pages that are not deleted, in display order. */
   const visiblePages = computed(() => pending.value.order.filter((page) => !pending.value.deleted[page]))
@@ -121,6 +129,7 @@ export function usePageEdits() {
   return {
     rotations,
     ops,
+    revisions,
     deleted,
     visiblePages,
     deletedCount,
@@ -163,6 +172,18 @@ export function usePageEdits() {
       update({
         ...pending.value,
         ops: pending.value.ops.map((existing, i) => [...existing, ...(pageOps.get(i) ?? [])]),
+      })
+    },
+    /**
+     * Shows a new image for each page (a company's deskew or despeckle) and clears that page's pixel edits,
+     * which were already drawn into the TIFF sent to the company. One undo step.
+     */
+    setPageRevisions(revisions: ReadonlyMap<number, number>) {
+      if (revisions.size === 0) return
+      update({
+        ...pending.value,
+        revisions: pending.value.revisions.map((revision, i) => revisions.get(i) ?? revision),
+        ops: pending.value.ops.map((pageOps, i) => (revisions.has(i) ? [] : pageOps)),
       })
     },
     /** Replaces the ops of several pages as a single undo step. */
